@@ -4,6 +4,18 @@ Convierte el contenido textual de un **PDF** o de **imágenes** a **Markdown (.m
 
 Herramienta de terminal para macOS/Linux: arrastras el archivo, eliges el modo y obtienes un `.md` en `~/Downloads` (por defecto), con barra de progreso.
 
+## Por qué existe (ahorro de tokens)
+
+Los **PDF escaneados** (páginas como imagen, sin texto seleccionable) suelen consumir **muchísimos tokens** cuando los subes directo a ChatGPT, Claude u otros modelos de OpenAI/Anthropic: la IA tiene que “leer” la imagen página por página y eso encarece el uso.
+
+`pdf2md` está pensado para un flujo más barato:
+
+1. Lees el PDF escaneado (o las capturas) **en local** con un modelo de visión vía Ollama.
+2. Obtienes un `.md` con el texto ya estructurado.
+3. Usas ese Markdown en Claude, ChatGPT u otra IA en la nube.
+
+Así reduces el gasto de tokens: en la nube procesas texto, no páginas escaneadas pesadas.
+
 ## Qué hace
 
 | Entrada | Comportamiento |
