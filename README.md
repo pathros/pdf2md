@@ -28,7 +28,7 @@ ollama pull benhaotang/Nanonets-OCR-s:F16
 ## Instalación
 
 ```bash
-git clone https://github.com/<TU_USUARIO>/pdf2md.git
+git clone https://github.com/pathros/pdf2md.git
 cd pdf2md
 ./setup.sh
 ```
