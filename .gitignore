@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.python-version
+.venv/
+*.md.bak
+.DS_Store

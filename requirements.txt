@@ -1,0 +1,9 @@
+# Extracción de texto/tablas de PDF a Markdown pensado para LLMs
+pymupdf4llm==1.28.0
+pymupdf==1.28.0
+
+# Cliente HTTP para hablar con Ollama (OCR con modelos de visión)
+requests==2.34.2
+
+# UI de terminal (prompts, colores, barra de progreso)
+rich==15.0.0
