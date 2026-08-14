@@ -1,43 +1,72 @@
 # pdf2md
 
-Convierte el contenido textual de un **PDF** o de **imágenes** a **Markdown (.md)** limpio y bien estructurado, pensado para que cualquier **LLM** lo digiera fácilmente.
+Transcribe **cualquier PDF** (digital o escaneado, **n páginas**) a **Markdown (.md)** o **Word (.docx)** con IA **local** (Ollama + Qwen visión). También acepta imágenes.
 
-Herramienta de terminal para macOS/Linux: arrastras el archivo, eliges el modo y obtienes un `.md` en `~/Downloads` (por defecto), con barra de progreso.
+Herramienta de terminal para **Windows, macOS y Linux**. En Windows el atajo es arrastrar el PDF sobre `Transcribir-PDF.bat`.
 
-## Por qué existe (ahorro de tokens)
+## Alcance
 
-Los **PDF escaneados** (páginas como imagen, sin texto seleccionable) suelen consumir **muchísimos tokens** cuando los subes directo a ChatGPT, Claude u otros modelos de OpenAI/Anthropic: la IA tiene que “leer” la imagen página por página y eso encarece el uso.
+| Entrada | Qué hace | ¿Tope de páginas? |
+|---------|----------|-------------------|
+| **PDF digital** (texto seleccionable) | Extrae texto, encabezados y tablas con **PyMuPDF / pymupdf4llm**. | No. Página a página. |
+| **PDF escaneado** | OCR de visión con **Ollama / Qwen**. **No usa Tesseract.** | No. Una página a la vez (el límite es el **tiempo**, no la RAM). |
+| **PDF mixto** | `--ocr auto`: texto donde hay capa; OCR solo en páginas-imagen. | Igual. |
+| **Imágenes** | Mismo OCR; un solo archivo de salida. | N archivos. |
 
-`pdf2md` está pensado para un flujo más barato:
+Objetivo: transcripción **fiel** (nombres, cifras, tablas), con mínimos errores, **sin enviar el PDF a la nube**.
 
-1. Lees el PDF escaneado (o las capturas) **en local** con un modelo de visión vía Ollama.
-2. Obtienes un `.md` con el texto ya estructurado.
-3. Usas ese Markdown en Claude, ChatGPT u otra IA en la nube.
+En CPU (p. ej. Intel i5, 16 GB) el OCR va **lento** (minutos por página). La terminal muestra **barra de progreso** y las **últimas 5 líneas** que se van transcribiendo (estilo log).
 
-Así reduces el gasto de tokens: en la nube procesas texto, no páginas escaneadas pesadas.
+## Salida
 
-## Qué hace
-
-| Entrada | Comportamiento |
-|---------|----------------|
-| **PDF con texto** | Extrae texto, encabezados y tablas con **PyMuPDF / pymupdf4llm** (rápido). |
-| **PDF escaneado** | Detecta páginas sin capa de texto y las transcribe con **OCR de visión vía Ollama**. **No usa Tesseract.** |
-| **Imágenes** | Transcribe N fotos/capturas con el mismo OCR y las junta en un solo `.md`. |
+| Sistema | Por defecto | También |
+|---------|-------------|---------|
+| **Windows** | `.docx` en `%USERPROFILE%\Documents\Transcripciones-PDF` | Otra carpeta con `-o` o el 2.º argumento del `.bat` |
+| **macOS / Linux** | `.md` en `~/Downloads` (en el menú pregunta md o docx) | `--format docx` o `--format md` |
 
 ## Requisitos
 
-- macOS o Linux con [`pyenv`](https://github.com/pyenv/pyenv) y [`pyenv-virtualenv`](https://github.com/pyenv/pyenv-virtualenv)
-- [Ollama](https://ollama.com) en ejecución (`ollama serve`) con un modelo de visión
+- [uv](https://docs.astral.sh/uv/) (gestión de Python; se instala en computadoras nuevas)
+- [Ollama](https://ollama.com) en ejecución, con un **modelo de visión** (Qwen 3.5/3.6 aceptan imagen)
 
-Modelos recomendados:
+En macOS/Linux, si ya tenías el entorno con `pyenv`, `setup.sh` sigue funcionando como respaldo.
+
+### Modelos y RAM (Windows 11 · Intel i5 · 16 GB)
+
+`qwen3.5` es **multimodal** (texto + imagen), así que sirve para el OCR.
+
+| Modelo | Peso (Q4 en Ollama) | ¿En 16 GB RAM? |
+|--------|---------------------|----------------|
+| **`qwen3.5:9b`** | ~6.6 GB | **Sí.** Es el recomendado. Cierra Chrome/Cursor pesados si se pone justo. |
+| `qwen3.5:4b` | ~3.4 GB | Sí, más rápido y peor OCR. |
+| **`qwen3.5:27b`** | **~17 GB** | **No de forma usable.** El modelo ya supera la RAM. Hace falta **24 GB+** (ideal 32 GB) y, mejor, GPU con 16 GB+ VRAM. |
 
 ```bash
-ollama pull qwen3.6:27b
-# o, especializado en OCR → Markdown:
-ollama pull benhaotang/Nanonets-OCR-s:F16
+ollama pull qwen3.5:9b
 ```
 
+Si no pasas `--model`, pdf2md elige solo: con menos de 24 GB de RAM prefiere `qwen3.5:9b`.
+
 ## Instalación
+
+### Windows 11 (PowerShell)
+
+Si `uv` aún no está (computadora nueva):
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Cierra y abre la terminal, clona el repo y configura:
+
+```powershell
+git clone https://github.com/pathros/pdf2md.git
+cd pdf2md
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+ollama pull qwen3.5:9b
+```
+
+### macOS / Linux
 
 ```bash
 git clone https://github.com/pathros/pdf2md.git
@@ -45,83 +74,92 @@ cd pdf2md
 ./setup.sh
 ```
 
-Esto crea el virtualenv `pdf2md` (Python 3.12.11) con `pyenv virtualenv`, lo activa en la carpeta (`pyenv local`) e instala las dependencias de `requirements.txt`.
+uv en computadoras nuevas (macOS/Linux):
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
 ## Uso
+
+### Windows — transcribir a Word
+
+Arrastra el PDF sobre **`Transcribir-PDF.bat`**, o:
+
+```bat
+Transcribir-PDF.bat "C:\Users\yo\Escritorio\acta.pdf"
+Transcribir-PDF.bat "C:\Users\yo\Escritorio\acta.pdf" "D:\Salidas"
+```
+
+- 1.er argumento: PDF (típicamente escaneado; si tiene texto digital, también lo usa).
+- 2.º argumento (opcional): carpeta de salida. Si se omite: `Documentos\Transcripciones-PDF`.
+- Resultado: `acta.docx`.
+
+También:
+
+```powershell
+.\run.ps1
+uv run python pdf2md.py pdf documento.pdf --format docx
+```
+
+### macOS / Linux
 
 ```bash
 ./run.sh
 ```
 
-Elige **1) PDF** o **2) Imágenes** y arrastra el/los archivo(s) a la terminal cuando lo pida.
-
-Alias opcional (ajusta la ruta a donde clonaste el repo):
+El menú pide modo y **formato** (`.md` o `.docx`). Arrastra el archivo a la terminal.
 
 ```bash
-echo "alias pdf2md='$HOME/python/pdf2md/run.sh'" >> ~/.zshrc
-source ~/.zshrc
-pdf2md
-```
-
-### Modo PDF
-
-```bash
-./run.sh                          # menú interactivo
-./run.sh documento.pdf            # PDF directo
-./run.sh pdf documento.pdf
+./run.sh documento.pdf
+./run.sh pdf escaneado.pdf --format docx -o ~/Documents/salidas/
+./run.sh pdf doc.pdf --ocr never --format md
 ```
 
 ### Modo imágenes (OCR)
 
 ```bash
-./run.sh images
-# te pide las rutas → arrastra N imágenes → Enter
-
-./run.sh images foto1.png foto2.jpg captura.webp
-./run.sh img ~/Desktop/a.png ~/Desktop/b.png -o ~/Downloads/notas.md
+./run.sh images foto1.png foto2.jpg
+./run.sh images a.png --format docx
 ```
 
-Formatos: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tif`, `.tiff`.
-
-- 1 imagen → el `.md` se llama como la imagen (`foto.md`)
-- Varias → `ocr-imagenes-YYYYMMDD-HHMMSS.md`
+Formatos de imagen: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tif`, `.tiff`.
 
 ### Opciones
 
 | Opción | Descripción |
 |--------|-------------|
-| `-o, --output` | Ruta o carpeta de salida `.md` (por defecto `~/Downloads`) |
-| `--ocr` | Solo PDF: `auto` / `always` / `never` |
-| `--model` | Modelo de visión en Ollama (predet. `qwen3.6:27b`) |
+| `-o, --output` | Ruta o **carpeta** de salida |
+| `--format` | `md` o `docx` |
+| `--ocr` | Solo PDF: `auto` (default) / `always` / `never` |
+| `--model` | Modelo de visión en Ollama |
 | `--host` | Host de Ollama (predet. `http://localhost:11434`) |
-
-```bash
-./run.sh pdf escaneado.pdf --ocr always
-./run.sh images a.png b.png --model benhaotang/Nanonets-OCR-s:F16
-./run.sh pdf doc.pdf --ocr never -o ~/Documents/salidas/
-```
 
 ### Variables de entorno
 
 | Variable | Uso |
 |----------|-----|
-| `PDF2MD_VISION_MODEL` | Modelo de visión de Ollama por defecto |
+| `PDF2MD_VISION_MODEL` | Modelo de visión de Ollama |
 | `PDF2MD_OUTPUT_DIR` | Carpeta de salida por defecto |
+| `PDF2MD_FORMAT` | `md` o `docx` |
 | `OLLAMA_HOST` | Host de Ollama |
 
-## Cómo funciona el OCR
+## Cómo funciona
 
-1. **PDF:** marca páginas sin capa de texto (con imágenes) como escaneadas. El texto embebido se extrae con pymupdf4llm. Las páginas escaneadas se renderizan a PNG y se envían a Ollama.
-2. **Imágenes:** cada archivo se manda a `/api/generate` de Ollama con un prompt de transcripción fiel a Markdown (sin traducir ni resumir) y se concatena en un único `.md`.
+1. **PDF digital:** pymupdf4llm extrae la capa de texto (sin Tesseract).
+2. **PDF escaneado:** cada página se renderiza a PNG y se manda a Ollama (`/api/generate`, streaming). El modelo no resume ni traduce.
+3. **n páginas:** el bucle es una página a la vez; un PDF de 200 páginas es válido, tardará proporcionalmente.
+4. **Word:** se arma Markdown interno y se exporta a `.docx` (títulos, listas, tablas, salto de página por hoja del PDF).
 
 ## Estructura
 
 ```
 pdf2md/
-├── pdf2md.py          # CLI principal
-├── run.sh             # Lanza la app con el virtualenv de pyenv
-├── setup.sh           # Crea el entorno e instala dependencias
-├── requirements.txt
+├── pdf2md.py
+├── Transcribir-PDF.bat   # Windows: arrastra el PDF → .docx
+├── setup.ps1 / run.ps1 / run.cmd
+├── setup.sh / run.sh
+├── pyproject.toml / uv.lock / requirements.txt
 └── README.md
 ```
 

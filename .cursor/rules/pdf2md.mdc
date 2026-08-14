@@ -1,0 +1,23 @@
+---
+description: pdf2md transcribe PDF digital y escaneado (Ollama/Qwen), n páginas, MD o DOCX
+alwaysApply: true
+---
+
+# pdf2md
+
+Transcribe **cualquier PDF** (texto digital y/o escaneado) con IA **local**:
+
+- Páginas con capa de texto → PyMuPDF / pymupdf4llm (rápido, fiel).
+- Páginas escaneadas → OCR de visión Ollama/Qwen, **una página a la vez**.
+- **Sin límite de páginas**; el coste es tiempo (en CPU, minutos/página en OCR), no un tope de `n`.
+
+## Salida
+
+- **Windows:** `.docx` por defecto → `%USERPROFILE%\Documents\Transcripciones-PDF` (o `-o` / 2.º arg de `Transcribir-PDF.bat`).
+- **macOS:** `.md` o `.docx` (`--format md|docx`).
+- Atajo Windows: arrastrar el PDF a `Transcribir-PDF.bat`.
+
+## Modelos
+
+- 16 GB RAM → `qwen3.5:9b`. No usar `qwen3.5:27b` (no cabe).
+- UI: barra de progreso + últimas 5 líneas de transcripción en vivo.
