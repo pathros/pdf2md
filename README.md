@@ -104,7 +104,12 @@ uv run python pdf2md.py pdf documento.pdf --format docx
 
 ### macOS / Linux
 
+No hace falta activar ningún venv a mano. El alias o `./run.sh` usan `uv run`
+y el `.venv` del proyecto solos:
+
 ```bash
+pdf2md                    # alias → ~/python/pdf2md/run.sh
+# o:
 ./run.sh
 ```
 
@@ -114,8 +119,11 @@ El menú pide modo y **formato** (`.md` o `.docx`). Arrastra el archivo a la ter
 ./run.sh documento.pdf
 ./run.sh pdf escaneado.pdf --format docx -o ~/Documents/salidas/
 ./run.sh pdf doc.pdf --ocr never --format md
+./run.sh pdf doc.pdf --model qwen3.8:27b   # forzar un modelo concreto
 ```
 
+Con ≥24 GB de RAM, si no pasas `--model`, prioriza `qwen3.8:27b` cuando esté
+instalado (luego `qwen3.6:27b`, etc.).
 ### Modo imágenes (OCR)
 
 ```bash

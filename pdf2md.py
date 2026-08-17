@@ -57,6 +57,7 @@ VISION_MODELS_LOW_RAM = (
     "benhaotang/Nanonets-OCR-s:F16",
 )
 VISION_MODELS_HIGH_RAM = (
+    "qwen3.8:27b",
     "qwen3.6:27b",
     "qwen3.5:27b",
     *VISION_MODELS_LOW_RAM,
