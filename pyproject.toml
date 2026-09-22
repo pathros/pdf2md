@@ -1,13 +1,14 @@
 [project]
 name = "pdf2md"
 version = "0.2.0"
-description = "Convierte PDF o imágenes a Markdown limpio vía PyMuPDF y OCR de visión con Ollama."
+description = "Convierte PDF, imágenes, Word o Excel a Markdown. OCR de visión con Ollama; Word y Excel sin IA."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pymupdf==1.28.0",
     "pymupdf4llm==1.28.0",
     "python-docx==1.2.0",
+    "openpyxl==3.1.5",
     "requests==2.34.2",
     "rich==15.0.0",
 ]

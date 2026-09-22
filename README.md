@@ -1,6 +1,6 @@
 # pdf2md
 
-Transcribe **cualquier PDF** (digital o escaneado, **n páginas**) a **Markdown (.md)** o **Word (.docx)** con IA **local** (Ollama + Qwen visión). También acepta imágenes.
+Transcribe **cualquier PDF** (digital o escaneado, **n páginas**) a **Markdown (.md)** o **Word (.docx)** con IA **local** (Ollama + Qwen visión). También acepta imágenes, Word y Excel.
 
 Herramienta de terminal para **Windows, macOS y Linux**. En Windows el atajo es arrastrar el PDF sobre `Transcribir-PDF.bat`.
 
@@ -12,6 +12,8 @@ Herramienta de terminal para **Windows, macOS y Linux**. En Windows el atajo es 
 | **PDF escaneado** | OCR de visión con **Ollama / Qwen**. **No usa Tesseract.** | No. Una página a la vez (el límite es el **tiempo**, no la RAM). |
 | **PDF mixto** | `--ocr auto`: texto donde hay capa; OCR solo en páginas-imagen. | Igual. |
 | **Imágenes** | Mismo OCR; un solo archivo de salida. | N archivos. |
+| **Word (.docx)** | Pasa a Markdown con pandoc. Sin OCR. | — |
+| **Excel (.xlsx, .xlsm)** | Cada hoja visible → tabla Markdown. Sin OCR. | No. Hoja por hoja. |
 
 Objetivo: transcripción **fiel** (nombres, cifras, tablas), con mínimos errores, **sin enviar el PDF a la nube**.
 
@@ -131,6 +133,46 @@ instalado (luego `qwen3.6:27b`, etc.).
 ./run.sh images a.png --format docx
 ```
 
+### Word → Markdown
+
+Requiere [pandoc](https://pandoc.org) (`brew install pandoc`). En el menú interactivo
+elige **3**, o:
+
+```bash
+./run.sh word documento.docx
+./run.sh documento.docx          # si la ruta termina en .docx, se infiere solo
+```
+
+El `.md` sale a `~/Downloads` por defecto (o `-o`).
+
+### Excel → Markdown
+
+Cada hoja **visible** de un `.xlsx` o `.xlsm` se vuelve una tabla de Markdown. No usa Ollama ni pandoc. En el menú interactivo elige **4**, o:
+
+```bash
+./run.sh excel datos.xlsx
+./run.sh datos.xlsx                       # si la ruta termina en .xlsx, se infiere solo
+./run.sh excel datos.xlsx --cell-width 40
+./run.sh excel datos.xlsx --cell-width 0  # no parte celdas largas
+```
+
+El `.md` sale a `~/Downloads` por defecto (o `-o`). El formato `.xls` (Excel 97-2003) no se lee: hay que guardarlo como `.xlsx`.
+
+Al armar la tabla:
+
+- El carácter `|` dentro de una celda se escribe como `\|`, para que no se confunda con el separador de columnas. También se escapan la barra invertida, la comilla invertida y el asterisco.
+- Un salto de línea dentro de la celda pasa a `&lt;br&gt;`. Un salto real partiría la fila.
+- Si el texto de una celda supera el ancho (`--cell-width`, 60 por defecto), se parte en ese límite con `&lt;br&gt;`. La fila sigue siendo **una sola línea** de Markdown; el corte se ve al previsualizar.
+- `<`, `>` y `&` se escapan para que no se lean como HTML. El `&lt;br&gt;` de los cortes se inserta después, así que sí funciona.
+- Fechas como `YYYY-MM-DD`. Porcentajes como `15%` (Excel guarda 0.15). Booleanos como `TRUE` / `FALSE`.
+- Si una fórmula no trae el valor que Excel calculó, se copia la fórmula (`=A1+B1`).
+- Una fila suelta encima de la tabla (título) queda como párrafo, no como encabezado de columnas.
+- Un rango combinado pequeño repite su valor en cada celda, porque Markdown no combina celdas. Un título fusionado a lo ancho se deja en una sola celda y pasa a párrafo.
+- Un hueco grande de filas o columnas vacías abre **otra tabla**, para no generar cientos de celdas vacías.
+- Hojas ocultas, imágenes y gráficos del libro no se exportan.
+
+En el menú interactivo, **0** cancela sin traceback (Ctrl+C también sale limpio).
+
 Formatos de imagen: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tif`, `.tiff`.
 
 ### Opciones
@@ -138,7 +180,8 @@ Formatos de imagen: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tif`, `.
 | Opción | Descripción |
 |--------|-------------|
 | `-o, --output` | Ruta o **carpeta** de salida |
-| `--format` | `md` o `docx` |
+| `--format` | `md` o `docx` (PDF e imágenes) |
+| `--cell-width` | Solo Excel: ancho máximo de una celda (predet. 60; `0` = no partir) |
 | `--ocr` | Solo PDF: `auto` (default) / `always` / `never` |
 | `--model` | Modelo de visión en Ollama |
 | `--host` | Host de Ollama (predet. `http://localhost:11434`) |
@@ -157,7 +200,8 @@ Formatos de imagen: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tif`, `.
 1. **PDF digital:** pymupdf4llm extrae la capa de texto (sin Tesseract).
 2. **PDF escaneado:** cada página se renderiza a PNG y se manda a Ollama (`/api/generate`, streaming). El modelo no resume ni traduce.
 3. **n páginas:** el bucle es una página a la vez; un PDF de 200 páginas es válido, tardará proporcionalmente.
-4. **Word:** se arma Markdown interno y se exporta a `.docx` (títulos, listas, tablas, salto de página por hoja del PDF).
+4. **Word:** se arma Markdown interno y se exporta a `.docx` (títulos, listas, tablas, salto de página por hoja del PDF). Word → Markdown usa pandoc.
+5. **Excel:** openpyxl lee las celdas (valor calculado, o la fórmula si no hay caché) y escribe tablas Markdown escapando `|` y partiendo celdas largas con `&lt;br&gt;`.
 
 ## Estructura
 

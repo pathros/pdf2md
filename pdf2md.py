@@ -5,8 +5,11 @@ Modos:
   pdf     Extrae texto/tablas con pymupdf4llm. Páginas escaneadas → OCR con
           Ollama (visión). Sin límite de páginas (una a la vez).
   images  Transcribe N imágenes con el mismo OCR y las junta en un archivo.
+  word    Convierte .docx → Markdown (pandoc; sin OCR).
+  excel   Convierte .xlsx / .xlsm → tablas Markdown (sin OCR).
 
 Salida: Windows → .docx por defecto; macOS/Linux → .md o .docx (--format).
+Excel y Word salen siempre a .md.
 """
 
 from __future__ import annotations
@@ -14,12 +17,17 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
-from datetime import datetime
+import textwrap
+from datetime import date, datetime, time
 from pathlib import Path
+from zipfile import BadZipFile
 
 import requests
 from docx import Document
@@ -39,6 +47,8 @@ from rich.text import Text
 
 import pymupdf  # PyMuPDF
 import pymupdf4llm
+from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 
 console = Console()
 
@@ -75,6 +85,16 @@ OCR_RENDER_ZOOM = 2.5
 IMAGE_EXTENSIONS = frozenset({
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff",
 })
+
+EXCEL_EXTENSIONS = frozenset({".xlsx", ".xlsm"})
+
+# Ancho máximo de texto dentro de una celda Markdown. El resto se parte con <br>.
+# 0 (por CLI) = no partir. Un salto de línea real rompería la fila de la tabla.
+DEFAULT_CELL_WIDTH = 60
+
+# Más de estas filas o columnas vacías seguidas separan otra tabla.
+_EXCEL_EMPTY_ROW_GAP = 2
+_EXCEL_EMPTY_COL_GAP = 2
 
 OCR_PROMPT = (
     "Eres un motor de OCR. Transcribe TODO el texto visible de esta imagen a "
@@ -255,11 +275,19 @@ def is_image_path(path: Path) -> bool:
     return path.suffix.lower() in IMAGE_EXTENSIONS
 
 
-def prompt_for_mode() -> str:
+def is_excel_path(path: Path) -> bool:
+    return path.suffix.lower() in EXCEL_EXTENSIONS
+
+
+def prompt_for_mode() -> str | None:
+    """Devuelve el comando elegido, o None si el usuario cancela."""
     console.print(
         Panel.fit(
             "[bold]1[/bold]  PDF → Markdown / Word\n"
-            "[bold]2[/bold]  Imágenes → Markdown / Word (OCR con Ollama)",
+            "[bold]2[/bold]  Imágenes → Markdown / Word (OCR con Ollama)\n"
+            "[bold]3[/bold]  Word (.docx) → Markdown\n"
+            "[bold]4[/bold]  Excel (.xlsx) → Markdown\n"
+            "[bold]0[/bold]  Cancelar",
             title="pdf2md",
             border_style="cyan",
         )
@@ -267,15 +295,26 @@ def prompt_for_mode() -> str:
     while True:
         choice = Prompt.ask(
             "[cyan]Modo[/cyan]",
-            choices=["1", "2", "pdf", "images", "img", "imgs"],
+            choices=[
+                "0", "1", "2", "3", "4",
+                "pdf", "images", "img", "imgs",
+                "word", "docx", "excel", "xlsx", "xlsm",
+                "cancel", "cancelar", "q",
+            ],
             default="1",
             show_choices=False,
         ).strip().lower()
+        if choice in ("0", "cancel", "cancelar", "q"):
+            return None
         if choice in ("1", "pdf"):
             return "pdf"
         if choice in ("2", "images", "img", "imgs"):
             return "images"
-        console.print("[yellow]Elige 1 (PDF) o 2 (Imágenes).[/yellow]")
+        if choice in ("3", "word", "docx"):
+            return "word"
+        if choice in ("4", "excel", "xlsx", "xlsm"):
+            return "excel"
+        console.print("[yellow]Elige 1, 2, 3, 4 o 0 (Cancelar).[/yellow]")
 
 
 def prompt_for_pdf() -> Path:
@@ -326,6 +365,62 @@ def prompt_for_images() -> list[Path]:
                 console.print(f"[red]{msg}[/red]")
             continue
         return ok
+
+
+def prompt_for_docx() -> Path:
+    """Pide interactivamente la ruta del .docx hasta obtener una válida."""
+    console.print(
+        Panel.fit(
+            "[bold]Arrastra el archivo Word (.docx) a esta terminal[/bold] y pulsa Enter.\n"
+            "También puedes pegar o escribir la ruta.",
+            title="pdf2md · Word → Markdown",
+            border_style="cyan",
+        )
+    )
+    while True:
+        raw = Prompt.ask("[cyan]Ruta del .docx[/cyan]")
+        if not raw.strip():
+            console.print("[yellow]No escribiste nada. Intenta de nuevo.[/yellow]")
+            continue
+        path = Path(clean_dropped_path(raw))
+        if not path.exists():
+            console.print(f"[red]No existe:[/red] {path}")
+            continue
+        if path.suffix.lower() != ".docx":
+            console.print("[red]El archivo no parece un .docx[/red]")
+            continue
+        return path
+
+
+def prompt_for_xlsx() -> Path:
+    """Pide interactivamente la ruta del .xlsx hasta obtener una válida."""
+    console.print(
+        Panel.fit(
+            "[bold]Arrastra el archivo Excel (.xlsx) a esta terminal[/bold] y pulsa Enter.\n"
+            "También puedes pegar o escribir la ruta. Se acepta .xlsm.",
+            title="pdf2md · Excel → Markdown",
+            border_style="cyan",
+        )
+    )
+    while True:
+        raw = Prompt.ask("[cyan]Ruta del .xlsx[/cyan]")
+        if not raw.strip():
+            console.print("[yellow]No escribiste nada. Intenta de nuevo.[/yellow]")
+            continue
+        path = Path(clean_dropped_path(raw))
+        if not path.exists():
+            console.print(f"[red]No existe:[/red] {path}")
+            continue
+        if path.suffix.lower() == ".xls":
+            console.print(
+                "[red]El formato .xls (Excel 97-2003) no está soportado.[/red] "
+                "Ábrelo y guárdalo como .xlsx."
+            )
+            continue
+        if not is_excel_path(path):
+            console.print("[red]El archivo no parece un .xlsx[/red]")
+            continue
+        return path
 
 
 def validate_image_paths(paths: list[Path]) -> tuple[list[Path], list[str]]:
@@ -674,6 +769,514 @@ def write_output(markdown: str, out_path: Path, fmt: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Word (.docx) → Markdown
+# --------------------------------------------------------------------------- #
+def find_pandoc() -> str | None:
+    return shutil.which("pandoc")
+
+
+def docx_to_markdown(docx_path: Path) -> str:
+    """Convierte .docx a Markdown con pandoc (mejor fidelidad de estructura)."""
+    pandoc = find_pandoc()
+    if not pandoc:
+        raise RuntimeError(
+            "Se necesita 'pandoc' para Word → Markdown. "
+            "Instálalo con: brew install pandoc"
+        )
+    result = subprocess.run(
+        [
+            pandoc,
+            str(docx_path),
+            "-f", "docx",
+            "-t", "gfm",
+            "--wrap=none",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "error desconocido").strip()
+        raise RuntimeError(f"pandoc falló: {err}")
+    body = result.stdout.strip()
+    frontmatter = (
+        "---\n"
+        f"fuente: {docx_path.name}\n"
+        "conversion: word→markdown (pandoc)\n"
+        "generado_por: pdf2md\n"
+        "---\n\n"
+        f"# {docx_path.stem}\n\n"
+    )
+    return frontmatter + body + "\n"
+
+
+# --------------------------------------------------------------------------- #
+# Excel (.xlsx / .xlsm) → Markdown
+# --------------------------------------------------------------------------- #
+def _normalize_newlines(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    for sep in ("\u2028", "\u2029", "\v", "\f"):
+        text = text.replace(sep, "\n")
+    return text
+
+
+def _strip_control_chars(text: str) -> str:
+    """Quita controles que no son salto de línea ni tabulación."""
+    kept: list[str] = []
+    for ch in text:
+        code = ord(ch)
+        if ch in "\n\t" or (code >= 32 and code != 127):
+            kept.append(ch)
+        else:
+            kept.append(" ")
+    return "".join(kept)
+
+
+def _format_has_percent(number_format: str | None) -> bool:
+    if not number_format:
+        return False
+    unquoted = re.sub(r'"[^"]*"', "", number_format)
+    return "%" in unquoted
+
+
+def _format_float(value: float) -> str:
+    if math.isnan(value) or math.isinf(value):
+        return ""
+    if abs(value) >= 1e15 or (value != 0 and abs(value) < 1e-9):
+        return format(value, ".12g")
+    rounded = round(value, 10)
+    if abs(rounded - round(rounded)) < 1e-9:
+        return str(int(round(rounded)))
+    return f"{rounded:.10f}".rstrip("0").rstrip(".")
+
+
+def _format_percent(value: float) -> str:
+    return _format_float(value * 100) + "%"
+
+
+def _rich_text_to_str(value: object) -> str | None:
+    if type(value).__name__ != "CellRichText":
+        return None
+    parts: list[str] = []
+    for block in value:  # type: ignore[attr-defined]
+        if isinstance(block, str):
+            parts.append(block)
+        else:
+            parts.append(str(getattr(block, "text", block)))
+    return "".join(parts)
+
+
+def _as_formula_text(value: object) -> str:
+    if isinstance(value, str) and value.startswith("="):
+        return value
+    text = getattr(value, "text", None)
+    if isinstance(text, str) and text.startswith("="):
+        return text
+    return ""
+
+
+def _excel_value_to_text(value: object, number_format: str | None) -> str:
+    """Valor de celda → texto fiel, sin símbolos de tabla Markdown."""
+    if value is None:
+        return ""
+    rich = _rich_text_to_str(value)
+    if rich is not None:
+        return rich
+    formula = _as_formula_text(value)
+    if formula:
+        return formula
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.isoformat(sep=" ", timespec="seconds")
+        if (
+            value.hour == 0
+            and value.minute == 0
+            and value.second == 0
+            and value.microsecond == 0
+        ):
+            return value.strftime("%Y-%m-%d")
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, time):
+        return value.strftime("%H:%M:%S")
+    if isinstance(value, float):
+        if _format_has_percent(number_format):
+            return _format_percent(value)
+        return _format_float(value)
+    if isinstance(value, int):
+        if _format_has_percent(number_format):
+            return _format_percent(float(value))
+        return str(value)
+    return str(value)
+
+
+def _cell_has_content(cell: object) -> bool:
+    if cell is None:
+        return False
+    link = getattr(cell, "hyperlink", None)
+    if link is not None and getattr(link, "target", None):
+        return True
+    value = getattr(cell, "value", None)
+    if value is None:
+        return False
+    if isinstance(value, str) and not value.strip() and not _as_formula_text(value):
+        return False
+    return True
+
+
+def _hyperlink_target(cell: object) -> str:
+    if cell is None:
+        return ""
+    link = getattr(cell, "hyperlink", None)
+    if link is None:
+        return ""
+    target = getattr(link, "target", None) or ""
+    return str(target).strip()
+
+
+def _render_excel_cell(value_cell: object, formula_cell: object) -> str:
+    value = getattr(value_cell, "value", None) if value_cell is not None else None
+    number_format = ""
+    for cell in (value_cell, formula_cell):
+        fmt = getattr(cell, "number_format", None) if cell is not None else None
+        if fmt and fmt != "General":
+            number_format = str(fmt)
+            break
+        if fmt and not number_format:
+            number_format = str(fmt)
+    if value is None and formula_cell is not None:
+        raw = getattr(formula_cell, "value", None)
+        if raw is not None:
+            value = _as_formula_text(raw) or raw
+    text = _excel_value_to_text(value, number_format or None)
+    target = _hyperlink_target(formula_cell) or _hyperlink_target(value_cell)
+    if target and target not in text:
+        text = f"{text} ({target})" if text else target
+    return text
+
+
+def _one_line(text: str) -> str:
+    text = _strip_control_chars(_normalize_newlines(text))
+    parts = [part.strip() for part in text.split("\n")]
+    return " ".join(part for part in parts if part)
+
+
+def _paragraph_text(text: str) -> str:
+    """Texto suelto (título sobre la tabla): no debe iniciar un encabezado."""
+    text = _one_line(text)
+    text = (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    if text.startswith("#"):
+        text = "\\" + text
+    return text
+
+
+def _escape_md_fragment(text: str) -> str:
+    """Escapa lo que parte una fila de tabla Markdown.
+
+    El orden importa: primero ``\\``, para que un ``\\`` final no se coma el
+    ``|`` de cierre, y para no duplicar las barras que añadimos después.
+    """
+    text = text.replace("\\", "\\\\")
+    text = text.replace("|", "\\|")
+    text = text.replace("`", "\\`")
+    text = text.replace("*", "\\*")
+    return text
+
+
+def _wrap_line(line: str, width: int) -> list[str]:
+    if width <= 0 or len(line) <= width:
+        return [line]
+    wrapped = textwrap.wrap(
+        line,
+        width=width,
+        break_long_words=True,
+        break_on_hyphens=False,
+        replace_whitespace=False,
+        drop_whitespace=False,
+    )
+    return wrapped or [line]
+
+
+def escape_table_cell(text: str, width: int) -> str:
+    """Deja una celda segura dentro de una fila ``| … |``.
+
+    Los saltos reales se vuelven ``<br>`` (un salto de línea partiría la fila).
+    El texto más ancho que ``width`` se parte igual, en un límite de palabra.
+    ``<br>`` se inserta después de escapar el HTML del usuario.
+    """
+    text = _strip_control_chars(_normalize_newlines(text)).replace("\t", " ")
+    if not text.strip():
+        return ""
+    text = (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    pieces: list[str] = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            pieces.append("")
+            continue
+        pieces.extend(part.strip() for part in _wrap_line(line, width))
+    while pieces and not pieces[0]:
+        pieces.pop(0)
+    while pieces and not pieces[-1]:
+        pieces.pop()
+    return "<br>".join(_escape_md_fragment(part) for part in pieces)
+
+
+def _rows_to_table(rows: list[list[str]], width: int) -> str:
+    ncol = max(len(row) for row in rows)
+    rendered: list[list[str]] = []
+    for row in rows:
+        padded = list(row) + [""] * (ncol - len(row))
+        rendered.append([escape_table_cell(cell, width) for cell in padded])
+    while ncol > 1 and all(not rendered[i][ncol - 1] for i in range(len(rendered))):
+        ncol -= 1
+        for row in rendered:
+            row.pop()
+
+    def fmt(cells: list[str]) -> str:
+        return "| " + " | ".join(cells) + " |"
+
+    lines = [
+        fmt(rendered[0]),
+        "| " + " | ".join("---" for _ in range(ncol)) + " |",
+    ]
+    lines.extend(fmt(row) for row in rendered[1:])
+    return "\n".join(lines)
+
+
+def _split_index_runs(values: list[int], max_gap: int) -> list[list[int]]:
+    """Parte índices ordenados cuando el hueco vacío supera ``max_gap``."""
+    if not values:
+        return []
+    groups: list[list[int]] = [[values[0]]]
+    for prev, cur in zip(values, values[1:]):
+        if cur - prev - 1 > max_gap:
+            groups.append([cur])
+        else:
+            groups[-1].append(cur)
+    return groups
+
+
+def _column_groups(used_cols: list[int], max_gap: int) -> list[list[int]]:
+    """Agrupa columnas. Un hueco corto se conserva; uno largo abre otra tabla."""
+    if not used_cols:
+        return []
+    groups: list[list[int]] = [[used_cols[0]]]
+    for prev, cur in zip(used_cols, used_cols[1:]):
+        hole = cur - prev - 1
+        if hole > max_gap:
+            groups.append([cur])
+        elif hole > 0:
+            groups[-1].extend(range(prev + 1, cur + 1))
+        else:
+            groups[-1].append(cur)
+    return groups
+
+
+def _split_preamble(rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
+    """Filas de un solo valor antes del encabezado pasan a párrafos."""
+    counts = [sum(1 for cell in row if cell.strip()) for row in rows]
+    if not any(counts):
+        return [], []
+    if sum(1 for n in counts if n) == 1 and max(counts) == 1:
+        text = next(cell.strip() for row in rows for cell in row if cell.strip())
+        return [text], []
+    header_at = next((i for i, n in enumerate(counts) if n >= 2), None)
+    if header_at is None:
+        return [], rows
+    preamble: list[str] = []
+    for row in rows[:header_at]:
+        texts = [cell.strip() for cell in row if cell.strip()]
+        if len(texts) == 1:
+            preamble.append(texts[0])
+    return preamble, rows[header_at:]
+
+
+def _tables_from_grid(
+    grid: dict[tuple[int, int], str],
+) -> list[tuple[list[str], list[list[str]]]]:
+    if not grid:
+        return []
+    blocks: list[tuple[list[str], list[list[str]]]] = []
+    for row_group in _split_index_runs(sorted({r for r, _c in grid}), _EXCEL_EMPTY_ROW_GAP):
+        row_set = set(row_group)
+        cols_used = sorted({c for r, c in grid if r in row_set})
+        for col_group in _column_groups(cols_used, _EXCEL_EMPTY_COL_GAP):
+            col_index = {c: i for i, c in enumerate(col_group)}
+            raw_rows: list[list[str]] = []
+            for r in row_group:
+                if not any((r, c) in grid for c in col_group):
+                    continue
+                line = [""] * len(col_group)
+                for c in col_group:
+                    if (r, c) in grid:
+                        line[col_index[c]] = grid[(r, c)]
+                raw_rows.append(line)
+            if not raw_rows:
+                continue
+            preamble, body = _split_preamble(raw_rows)
+            if preamble or body:
+                blocks.append((preamble, body))
+    return blocks
+
+
+def _heading_text(name: str) -> str:
+    cleaned = "".join(
+        ch if ord(ch) >= 32 and ord(ch) != 127 else " "
+        for ch in name
+    )
+    return " ".join(cleaned.split()) or "Hoja"
+
+
+def _yaml_quote(value: str) -> str:
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "")
+    )
+    return f'"{escaped}"'
+
+
+def _worksheet_cells(ws: object) -> dict:
+    # Solo celdas reales. iter_rows() sigue el dimension del XML, que Excel
+    # a veces infla hasta la última columna y haría una tabla gigante vacía.
+    cells = getattr(ws, "_cells", None)
+    return cells if isinstance(cells, dict) else {}
+
+
+def _fill_merged(ws: object, grid: dict[tuple[int, int], str]) -> None:
+    """Repite el valor de un rango combinado en cada celda.
+
+    Un merge de una sola fila y muchas columnas suele ser un título: se deja
+    solo en la celda de origen para que quede como párrafo y no ensanche la tabla.
+    """
+    merged = getattr(ws, "merged_cells", None)
+    ranges = getattr(merged, "ranges", None) if merged is not None else None
+    if not ranges:
+        return
+    for cell_range in list(ranges):
+        n_rows = cell_range.max_row - cell_range.min_row + 1
+        n_cols = cell_range.max_col - cell_range.min_col + 1
+        if n_rows * n_cols > 64 or (n_rows == 1 and n_cols > 3):
+            continue
+        origin = (cell_range.min_row, cell_range.min_col)
+        text = grid.get(origin, "")
+        if not str(text).strip():
+            continue
+        for row in range(cell_range.min_row, cell_range.max_row + 1):
+            for col in range(cell_range.min_col, cell_range.max_col + 1):
+                grid[(row, col)] = text
+
+
+def _sheet_grid(ws_values: object, ws_formulas: object) -> dict[tuple[int, int], str]:
+    value_cells = _worksheet_cells(ws_values)
+    formula_cells = _worksheet_cells(ws_formulas)
+    coords = {
+        key for key, cell in value_cells.items() if _cell_has_content(cell)
+    }
+    coords.update(
+        key for key, cell in formula_cells.items() if _cell_has_content(cell)
+    )
+    grid: dict[tuple[int, int], str] = {}
+    for key in coords:
+        text = _render_excel_cell(value_cells.get(key), formula_cells.get(key))
+        if text.strip():
+            grid[key] = text
+    _fill_merged(ws_formulas, grid)
+    return grid
+
+
+def _render_sheet(
+    name: str,
+    blocks: list[tuple[list[str], list[list[str]]]],
+    width: int,
+) -> str:
+    parts = [f"## {_heading_text(name)}", ""]
+    for preamble, rows in blocks:
+        for line in preamble:
+            paragraph = _paragraph_text(line)
+            if paragraph:
+                parts.append(paragraph)
+                parts.append("")
+        if rows:
+            parts.append(_rows_to_table(rows, width))
+            parts.append("")
+    return "\n".join(parts).rstrip() + "\n"
+
+
+def xlsx_to_markdown(xlsx_path: Path, cell_width: int = DEFAULT_CELL_WIDTH) -> str:
+    """Convierte cada hoja visible en una o más tablas Markdown.
+
+    Las fórmulas usan el valor calculado que Excel guardó. Si no hay caché,
+    se escribe la fórmula (``=A1+B1``) para no perder la celda.
+    """
+    if cell_width < 0:
+        cell_width = 0
+    try:
+        wb_values = load_workbook(xlsx_path, data_only=True)
+        wb_formulas = load_workbook(xlsx_path, data_only=False)
+    except (InvalidFileException, BadZipFile) as exc:
+        raise RuntimeError(
+            "No se pudo leer el Excel. Si es .xls antiguo, ábrelo y guárdalo "
+            f"como .xlsx. Si tiene contraseña, quítala. Detalle: {exc}"
+        ) from exc
+
+    sections: list[str] = []
+    try:
+        names = list(wb_formulas.sheetnames)
+        visible = [
+            name for name in names
+            if wb_formulas[name].sheet_state == "visible"
+        ]
+        chosen = visible or names
+        for name in chosen:
+            grid = _sheet_grid(wb_values[name], wb_formulas[name])
+            blocks = _tables_from_grid(grid)
+            if not blocks:
+                console.print(f"  · {name}: sin datos", markup=False)
+                continue
+            n_tables = sum(1 for _pre, rows in blocks if rows)
+            n_rows = sum(len(rows) for _pre, rows in blocks if rows)
+            if n_tables:
+                detail = f"{n_rows} fila(s), {n_tables} tabla(s)"
+            else:
+                detail = "solo texto, sin tabla"
+            console.print(f"  · {name}: {detail}", markup=False)
+            sections.append(_render_sheet(name, blocks, cell_width))
+    finally:
+        wb_values.close()
+        wb_formulas.close()
+
+    if sections:
+        body = "\n".join(section.rstrip() for section in sections).strip() + "\n"
+    else:
+        body = "_El libro no tiene celdas con datos._\n"
+
+    frontmatter = (
+        "---\n"
+        f"fuente: {_yaml_quote(xlsx_path.name)}\n"
+        f"hojas: {len(sections)}\n"
+        'conversion: "excel→markdown"\n'
+        "generado_por: pdf2md\n"
+        "---\n\n"
+        f"# {xlsx_path.stem}\n\n"
+    )
+    return frontmatter + body
+
+
+# --------------------------------------------------------------------------- #
 # Construcción del Markdown (PDF)
 # --------------------------------------------------------------------------- #
 def build_markdown(
@@ -819,9 +1422,16 @@ def normalize_argv(argv: list[str]) -> list[str]:
     """Inserta el subcomando si el usuario pasó solo una ruta o flags."""
     if not argv:
         return argv
-    if argv[0] in ("pdf", "images", "img", "imgs", "-h", "--help"):
+    if argv[0] in (
+        "pdf", "images", "img", "imgs", "word", "docx",
+        "excel", "xlsx", "xlsm", "-h", "--help",
+    ):
         if argv[0] in ("img", "imgs"):
             return ["images", *argv[1:]]
+        if argv[0] == "docx":
+            return ["word", *argv[1:]]
+        if argv[0] in ("xlsx", "xlsm"):
+            return ["excel", *argv[1:]]
         return argv
 
     # Flags globales / de pdf sin subcomando → modo pdf (compatibilidad).
@@ -831,6 +1441,10 @@ def normalize_argv(argv: list[str]) -> list[str]:
     first = Path(clean_dropped_path(argv[0]))
     if is_image_path(first):
         return ["images", *argv]
+    if first.suffix.lower() == ".docx":
+        return ["word", *argv]
+    if is_excel_path(first) or first.suffix.lower() == ".xls":
+        return ["excel", *argv]
     return ["pdf", *argv]
 
 
@@ -838,7 +1452,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Transcribe un PDF o imágenes a Markdown o Word "
-            "(OCR con Ollama / visión). Sin límite de páginas."
+            "(OCR con Ollama / visión), o convierte Word o Excel → Markdown. "
+            "Sin límite de páginas."
         ),
     )
     sub = parser.add_subparsers(dest="command")
@@ -911,6 +1526,47 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     img_p.add_argument(
         "--host", default=DEFAULT_OLLAMA_HOST,
         help=f"Host de Ollama. Por defecto: {DEFAULT_OLLAMA_HOST}",
+    )
+
+    word_p = sub.add_parser(
+        "word",
+        aliases=["docx"],
+        help="Convertir un .docx a Markdown (requiere pandoc).",
+    )
+    word_p.add_argument(
+        "docx",
+        nargs="?",
+        help="Ruta del .docx (si se omite, se pregunta).",
+    )
+    word_p.add_argument(
+        "-o", "--output",
+        help=f"Ruta o carpeta de salida (.md). Por defecto: {default_output_dir()}",
+    )
+
+    excel_p = sub.add_parser(
+        "excel",
+        aliases=["xlsx"],
+        help="Convertir un .xlsx (o .xlsm) a tablas Markdown.",
+    )
+    excel_p.add_argument(
+        "xlsx",
+        nargs="?",
+        help="Ruta del .xlsx (si se omite, se pregunta).",
+    )
+    excel_p.add_argument(
+        "-o", "--output",
+        help=f"Ruta o carpeta de salida (.md). Por defecto: {default_output_dir()}",
+    )
+    excel_p.add_argument(
+        "--cell-width",
+        type=int,
+        default=DEFAULT_CELL_WIDTH,
+        metavar="N",
+        help=(
+            "Máximo de caracteres por línea dentro de una celda. "
+            f"Lo que sobre se parte con <br> (predet. {DEFAULT_CELL_WIDTH}). "
+            "0 = no partir."
+        ),
     )
 
     return parser.parse_args(argv)
@@ -1008,16 +1664,117 @@ def run_images(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_word(args: argparse.Namespace) -> int:
+    docx_path = Path(clean_dropped_path(args.docx)) if args.docx else prompt_for_docx()
+    if not docx_path.exists() or docx_path.suffix.lower() != ".docx":
+        console.print(f"[red]Archivo Word inválido:[/red] {docx_path}")
+        return 1
+
+    out_path = resolve_output_path(docx_path.stem, args.output, "md")
+
+    console.print(f"[cyan]Entrada :[/cyan] {docx_path}")
+    console.print(f"[cyan]Salida  :[/cyan] {out_path}")
+    console.print("[cyan]Motor   :[/cyan] pandoc (Word → Markdown)")
+
+    try:
+        markdown = docx_to_markdown(docx_path)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Error al convertir el Word:[/red] {exc}")
+        return 1
+
+    write_output(markdown, out_path, "md")
+
+    console.print(
+        Panel.fit(
+            f"[green]Listo[/green] -> {out_path}\n"
+            f"{len(markdown):,} caracteres de Markdown.",
+            border_style="green",
+        )
+    )
+    return 0
+
+
+def run_excel(args: argparse.Namespace) -> int:
+    if args.xlsx:
+        xlsx_path = Path(clean_dropped_path(args.xlsx))
+    else:
+        xlsx_path = prompt_for_xlsx()
+    if not xlsx_path.exists():
+        console.print(f"[red]No existe:[/red] {xlsx_path}")
+        return 1
+    if xlsx_path.suffix.lower() == ".xls":
+        console.print(
+            "[red]El formato .xls (Excel 97-2003) no está soportado.[/red] "
+            "Ábrelo y guárdalo como .xlsx."
+        )
+        return 1
+    if not is_excel_path(xlsx_path):
+        console.print(f"[red]Archivo Excel inválido:[/red] {xlsx_path}")
+        return 1
+
+    cell_width = args.cell_width if args.cell_width > 0 else 0
+    out_path = resolve_output_path(xlsx_path.stem, args.output, "md")
+
+    console.print(f"[cyan]Entrada :[/cyan] {xlsx_path}")
+    console.print(f"[cyan]Salida  :[/cyan] {out_path}")
+    ancho = "sin corte" if cell_width == 0 else str(cell_width)
+    console.print(f"[cyan]Celdas  :[/cyan] ancho {ancho}")
+
+    try:
+        markdown = xlsx_to_markdown(xlsx_path, cell_width=cell_width)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Error al convertir el Excel:[/red] {exc}")
+        return 1
+
+    write_output(markdown, out_path, "md")
+
+    console.print(
+        Panel.fit(
+            f"[green]Listo[/green] -> {out_path}\n"
+            f"{len(markdown):,} caracteres de Markdown.",
+            border_style="green",
+        )
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelado.[/yellow]")
+        return 130
+
+
+def _main(argv: list[str] | None = None) -> int:
     raw = list(argv if argv is not None else sys.argv[1:])
     interactive = not raw
     if not raw:
-        raw = [prompt_for_mode()]
+        mode = prompt_for_mode()
+        if mode is None:
+            console.print("[yellow]Cancelado.[/yellow]")
+            return 0
+        raw = [mode]
 
     args = parse_args(normalize_argv(raw))
+    if args.command in ("xlsx", "xlsm"):
+        args.command = "excel"
+    if args.command == "docx":
+        args.command = "word"
+    if args.command in ("img", "imgs"):
+        args.command = "images"
     if not args.command:
-        args = parse_args([prompt_for_mode()])
+        mode = prompt_for_mode()
+        if mode is None:
+            console.print("[yellow]Cancelado.[/yellow]")
+            return 0
+        args = parse_args([mode])
         interactive = True
+
+    if args.command == "word":
+        return run_word(args)
+    if args.command == "excel":
+        return run_excel(args)
 
     if interactive and not getattr(args, "out_format", None) and os.name != "nt":
         args.out_format = Prompt.ask(
@@ -1034,7 +1791,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "images":
         return run_images(args)
 
-    console.print("[red]Comando no reconocido. Usa 'pdf' o 'images'.[/red]")
+    console.print(
+        "[red]Comando no reconocido. Usa 'pdf', 'images', 'word' o 'excel'.[/red]"
+    )
     return 1
 
 
