@@ -11,6 +11,8 @@ Transcribe **cualquier PDF** (texto digital y/o escaneado) con IA **local**:
 - Páginas escaneadas → OCR de visión Ollama/Qwen, **una página a la vez**.
 - **Sin límite de páginas**; el coste es tiempo (en CPU, minutos/página en OCR), no un tope de `n`.
 - **Excel (`.xlsx` / `.xlsm`)** → tablas Markdown, sin Ollama. Escapa pipe, barra invertida, comilla invertida y asterisco. Celdas largas y saltos de línea se parten con `<br>` (`--cell-width`, 60). Salida siempre `.md`.
+- **PowerPoint (`.pptx` / `.pptm`)** → Markdown, sin Ollama. Una sección por diapositiva (título, viñetas, tablas con el mismo escape, notas). Salida siempre `.md`.
+- **Markdown (`.md`)** → Word (`.docx`), sin Ollama ni pandoc. Títulos, listas, tablas, citas y código. Un `<br>` de celda pasa a salto de línea. Salida siempre `.docx`.
 
 ## Salida
 

@@ -1,6 +1,6 @@
 # pdf2md
 
-Transcribe **cualquier PDF** (digital o escaneado, **n páginas**) a **Markdown (.md)** o **Word (.docx)** con IA **local** (Ollama + Qwen visión). También acepta imágenes, Word y Excel.
+Transcribe **cualquier PDF** (digital o escaneado, **n páginas**) a **Markdown (.md)** o **Word (.docx)** con IA **local** (Ollama + Qwen visión). También acepta imágenes, Word, Excel, PowerPoint y Markdown.
 
 Herramienta de terminal para **Windows, macOS y Linux**. En Windows el atajo es arrastrar el PDF sobre `Transcribir-PDF.bat`.
 
@@ -14,6 +14,8 @@ Herramienta de terminal para **Windows, macOS y Linux**. En Windows el atajo es 
 | **Imágenes** | Mismo OCR; un solo archivo de salida. | N archivos. |
 | **Word (.docx)** | Pasa a Markdown con pandoc. Sin OCR. | — |
 | **Excel (.xlsx, .xlsm)** | Cada hoja visible → tabla Markdown. Sin OCR. | No. Hoja por hoja. |
+| **PowerPoint (.pptx, .pptm)** | Cada diapositiva → Markdown (título, viñetas, tablas, notas). Sin OCR. | No. Diapositiva a diapositiva. |
+| **Markdown (.md)** | Pasa a Word (`.docx`): títulos, listas, tablas, citas y código. Sin OCR. | — |
 
 Objetivo: transcripción **fiel** (nombres, cifras, tablas), con mínimos errores, **sin enviar el PDF a la nube**.
 
@@ -171,6 +173,43 @@ Al armar la tabla:
 - Un hueco grande de filas o columnas vacías abre **otra tabla**, para no generar cientos de celdas vacías.
 - Hojas ocultas, imágenes y gráficos del libro no se exportan.
 
+### PowerPoint → Markdown
+
+Cada diapositiva de un `.pptx` o `.pptm` (también `.ppsx`) se vuelve una sección de Markdown. No usa Ollama ni pandoc. En el menú interactivo elige **5**, o:
+
+```bash
+./run.sh pptx presentacion.pptx
+./run.sh presentacion.pptx                # si la ruta termina en .pptx, se infiere solo
+./run.sh pptx presentacion.pptx --cell-width 40
+```
+
+El `.md` sale a `~/Downloads` por defecto (o `-o`). El formato `.ppt` (PowerPoint 97-2003) no se lee: hay que guardarlo como `.pptx`.
+
+- El título de la diapositiva queda en el encabezado (`## Diapositiva 1. …`). El texto del cuerpo sale como lista, con el nivel de la viñeta.
+- Las tablas usan las mismas precauciones que Excel: `\|`, salto de línea como `&lt;br&gt;` y corte de celdas largas con `--cell-width`.
+- Si el gráfico trae categorías y series, se vuelcan a una tabla. Si no, queda el título del gráfico.
+- Las notas del orador van al final de la diapositiva, bajo `### Notas`.
+- Una diapositiva oculta se marca `(oculta)` y sí se incluye.
+- Las imágenes sin texto alternativo y los diagramas SmartArt no se transcriben: el archivo no trae ese texto.
+
+### Markdown → Word
+
+Un `.md` (también `.markdown`) se vuelve un `.docx`. No usa Ollama ni pandoc: es el mismo exportador con el que un PDF pasa a Word.
+
+Arranca el menú con `./run.sh` (o el alias `pdf2md`) y elige **6**. Ahí pide la ruta: arrastra el `.md` a la terminal y pulsa Enter. El `.docx` sale a `~/Downloads`.
+
+```bash
+./run.sh
+```
+
+Si ya tienes la ruta a mano, también vale pasarla directo (`./run.sh notas.md`, o `-o` para otra carpeta). Siempre es Word; `--format` no aplica en este modo.
+
+- Títulos, listas (con el nivel de la sangría), tablas, citas (`>`) y bloques de código.
+- Varias líneas seguidas, sin línea en blanco, forman un solo párrafo.
+- Un `<br>` dentro de una celda (como los que escribe Excel o PowerPoint) pasa a un salto de línea en Word. `\|`, `\\` y las entidades `&amp;` `&lt;` `&gt;` se deshacen.
+- El bloque `---` inicial de metadatos (fuente, generado_por) no se copia al Word.
+- Una imagen `![texto](ruta)` deja el texto; no incrusta el archivo.
+
 En el menú interactivo, **0** cancela sin traceback (Ctrl+C también sale limpio).
 
 Formatos de imagen: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tif`, `.tiff`.
@@ -180,8 +219,8 @@ Formatos de imagen: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tif`, `.
 | Opción | Descripción |
 |--------|-------------|
 | `-o, --output` | Ruta o **carpeta** de salida |
-| `--format` | `md` o `docx` (PDF e imágenes) |
-| `--cell-width` | Solo Excel: ancho máximo de una celda (predet. 60; `0` = no partir) |
+| `--format` | `md` o `docx` (PDF e imágenes). El modo Markdown siempre escribe `.docx` |
+| `--cell-width` | Excel y PowerPoint: ancho máximo de una celda (predet. 60; `0` = no partir) |
 | `--ocr` | Solo PDF: `auto` (default) / `always` / `never` |
 | `--model` | Modelo de visión en Ollama |
 | `--host` | Host de Ollama (predet. `http://localhost:11434`) |
@@ -202,6 +241,8 @@ Formatos de imagen: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tif`, `.
 3. **n páginas:** el bucle es una página a la vez; un PDF de 200 páginas es válido, tardará proporcionalmente.
 4. **Word:** se arma Markdown interno y se exporta a `.docx` (títulos, listas, tablas, salto de página por hoja del PDF). Word → Markdown usa pandoc.
 5. **Excel:** openpyxl lee las celdas (valor calculado, o la fórmula si no hay caché) y escribe tablas Markdown escapando `|` y partiendo celdas largas con `&lt;br&gt;`.
+6. **PowerPoint:** python-pptx lee cada diapositiva (título, viñetas, tablas, gráficos con datos y notas) y escribe Markdown. Las imágenes sin texto alternativo no se transcriben.
+7. **Markdown → Word:** python-docx arma el `.docx` (títulos, listas, tablas, citas, código). Un `<br>` de una celda pasa a salto de línea.
 
 ## Estructura
 

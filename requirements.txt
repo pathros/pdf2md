@@ -8,8 +8,11 @@ requests==2.34.2
 # UI de terminal (prompts, colores, barra de progreso)
 rich==15.0.0
 
-# Exportar la transcripción a Word (.docx)
+# Exportar a Word (.docx): transcripción y también .md → .docx
 python-docx==1.2.0
 
 # Leer libros de Excel (.xlsx / .xlsm) para volcarlos a tablas Markdown
 openpyxl==3.1.5
+
+# Leer presentaciones PowerPoint (.pptx / .pptm) para volcarlas a Markdown
+python-pptx==1.0.2

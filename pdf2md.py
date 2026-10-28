@@ -7,9 +7,11 @@ Modos:
   images  Transcribe N imágenes con el mismo OCR y las junta en un archivo.
   word    Convierte .docx → Markdown (pandoc; sin OCR).
   excel   Convierte .xlsx / .xlsm → tablas Markdown (sin OCR).
+  pptx    Convierte .pptx / .pptm → Markdown (sin OCR).
+  md      Convierte .md → Word (.docx), sin OCR ni pandoc.
 
 Salida: Windows → .docx por defecto; macOS/Linux → .md o .docx (--format).
-Excel y Word salen siempre a .md.
+Excel, PowerPoint y Word salen siempre a .md. Un .md sale siempre a .docx.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from zipfile import BadZipFile
 
 import requests
 from docx import Document
+from docx.shared import Inches, Pt
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
@@ -49,6 +52,9 @@ import pymupdf  # PyMuPDF
 import pymupdf4llm
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE, PP_PLACEHOLDER
+from pptx.exc import PackageNotFoundError
 
 console = Console()
 
@@ -87,6 +93,17 @@ IMAGE_EXTENSIONS = frozenset({
 })
 
 EXCEL_EXTENSIONS = frozenset({".xlsx", ".xlsm"})
+
+PPTX_EXTENSIONS = frozenset({".pptx", ".pptm", ".ppsx", ".ppsm"})
+
+MD_EXTENSIONS = frozenset({".md", ".markdown", ".mdown"})
+
+_TITLE_PLACEHOLDERS = {
+    PP_PLACEHOLDER.TITLE,
+    PP_PLACEHOLDER.CENTER_TITLE,
+}
+if hasattr(PP_PLACEHOLDER, "VERTICAL_TITLE"):
+    _TITLE_PLACEHOLDERS.add(PP_PLACEHOLDER.VERTICAL_TITLE)
 
 # Ancho máximo de texto dentro de una celda Markdown. El resto se parte con <br>.
 # 0 (por CLI) = no partir. Un salto de línea real rompería la fila de la tabla.
@@ -279,6 +296,14 @@ def is_excel_path(path: Path) -> bool:
     return path.suffix.lower() in EXCEL_EXTENSIONS
 
 
+def is_pptx_path(path: Path) -> bool:
+    return path.suffix.lower() in PPTX_EXTENSIONS
+
+
+def is_md_path(path: Path) -> bool:
+    return path.suffix.lower() in MD_EXTENSIONS
+
+
 def prompt_for_mode() -> str | None:
     """Devuelve el comando elegido, o None si el usuario cancela."""
     console.print(
@@ -287,6 +312,8 @@ def prompt_for_mode() -> str | None:
             "[bold]2[/bold]  Imágenes → Markdown / Word (OCR con Ollama)\n"
             "[bold]3[/bold]  Word (.docx) → Markdown\n"
             "[bold]4[/bold]  Excel (.xlsx) → Markdown\n"
+            "[bold]5[/bold]  PowerPoint (.pptx) → Markdown\n"
+            "[bold]6[/bold]  Markdown (.md) → Word\n"
             "[bold]0[/bold]  Cancelar",
             title="pdf2md",
             border_style="cyan",
@@ -296,9 +323,11 @@ def prompt_for_mode() -> str | None:
         choice = Prompt.ask(
             "[cyan]Modo[/cyan]",
             choices=[
-                "0", "1", "2", "3", "4",
+                "0", "1", "2", "3", "4", "5", "6",
                 "pdf", "images", "img", "imgs",
                 "word", "docx", "excel", "xlsx", "xlsm",
+                "pptx", "ppt", "slides",
+                "md", "markdown",
                 "cancel", "cancelar", "q",
             ],
             default="1",
@@ -314,7 +343,11 @@ def prompt_for_mode() -> str | None:
             return "word"
         if choice in ("4", "excel", "xlsx", "xlsm"):
             return "excel"
-        console.print("[yellow]Elige 1, 2, 3, 4 o 0 (Cancelar).[/yellow]")
+        if choice in ("5", "pptx", "ppt", "slides"):
+            return "pptx"
+        if choice in ("6", "md", "markdown"):
+            return "md"
+        console.print("[yellow]Elige 1, 2, 3, 4, 5, 6 o 0 (Cancelar).[/yellow]")
 
 
 def prompt_for_pdf() -> Path:
@@ -419,6 +452,62 @@ def prompt_for_xlsx() -> Path:
             continue
         if not is_excel_path(path):
             console.print("[red]El archivo no parece un .xlsx[/red]")
+            continue
+        return path
+
+
+def prompt_for_pptx() -> Path:
+    """Pide interactivamente la ruta del .pptx hasta obtener una válida."""
+    console.print(
+        Panel.fit(
+            "[bold]Arrastra el archivo PowerPoint (.pptx) a esta terminal[/bold] y pulsa Enter.\n"
+            "También puedes pegar o escribir la ruta. Se acepta .pptm.",
+            title="pdf2md · PowerPoint → Markdown",
+            border_style="cyan",
+        )
+    )
+    while True:
+        raw = Prompt.ask("[cyan]Ruta del .pptx[/cyan]")
+        if not raw.strip():
+            console.print("[yellow]No escribiste nada. Intenta de nuevo.[/yellow]")
+            continue
+        path = Path(clean_dropped_path(raw))
+        if not path.exists():
+            console.print(f"[red]No existe:[/red] {path}")
+            continue
+        if path.suffix.lower() == ".ppt":
+            console.print(
+                "[red]El formato .ppt (PowerPoint 97-2003) no está soportado.[/red] "
+                "Ábrelo y guárdalo como .pptx."
+            )
+            continue
+        if not is_pptx_path(path):
+            console.print("[red]El archivo no parece un .pptx[/red]")
+            continue
+        return path
+
+
+def prompt_for_md() -> Path:
+    """Pide interactivamente la ruta del .md hasta obtener una válida."""
+    console.print(
+        Panel.fit(
+            "[bold]Arrastra el archivo Markdown (.md) a esta terminal[/bold] y pulsa Enter.\n"
+            "También puedes pegar o escribir la ruta. Se acepta .markdown.",
+            title="pdf2md · Markdown → Word",
+            border_style="cyan",
+        )
+    )
+    while True:
+        raw = Prompt.ask("[cyan]Ruta del .md[/cyan]")
+        if not raw.strip():
+            console.print("[yellow]No escribiste nada. Intenta de nuevo.[/yellow]")
+            continue
+        path = Path(clean_dropped_path(raw))
+        if not path.exists():
+            console.print(f"[red]No existe:[/red] {path}")
+            continue
+        if not is_md_path(path):
+            console.print("[red]El archivo no parece un .md[/red]")
             continue
         return path
 
@@ -598,13 +687,16 @@ def ocr_page_with_ollama(
 # Markdown → Word (.docx)
 # --------------------------------------------------------------------------- #
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
-_UL_RE = re.compile(r"^[-*+]\s+(.*)$")
-_OL_RE = re.compile(r"^(\d+)[.)]\s+(.*)$")
+_UL_RE = re.compile(r"^([ \t]*)[-*+]\s+(.*)$")
+_OL_RE = re.compile(r"^([ \t]*)(\d+)[.)]\s+(.*)$")
 _PAGE_MARK_RE = re.compile(r"^<!--\s*página\s+\d+\s*-->\s*$", re.I)
 _HTML_COMMENT_RE = re.compile(r"^<!--.*?-->\s*$")
 _TABLE_ROW_RE = re.compile(r"^\|(.+)\|\s*$")
 _TABLE_SEP_RE = re.compile(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 _INLINE_RE = re.compile(r"(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)")
+_BR_RE = re.compile(r"(?i)<br\s*/?>")
+_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
+_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 
 
 def _strip_frontmatter(md: str) -> str:
@@ -616,34 +708,134 @@ def _strip_frontmatter(md: str) -> str:
     return md[end + 5 :]
 
 
+def _restore_md_text(text: str) -> str:
+    """Deshace el escape de tablas (Excel/PowerPoint) y los ``<br>``."""
+    text = _BR_RE.sub("\n", text)
+    text = (
+        text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+    )
+    text = text.replace("\\|", "|").replace("\\`", "`").replace("\\*", "*")
+    return text.replace("\\\\", "\\")
+
+
+def _plain_md_text(text: str) -> str:
+    """Texto de un encabezado: sin marcas inline ni saltos."""
+    text = _restore_md_text(text)
+    text = _IMAGE_RE.sub(lambda m: m.group(1) or "[imagen]", text)
+    text = _LINK_RE.sub(r"\1 (\2)", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    return " ".join(text.split())
+
+
+def _add_run_with_breaks(paragraph, text: str, *, bold: bool = False, italic: bool = False) -> None:
+    pieces = text.split("\n")
+    for idx, piece in enumerate(pieces):
+        if idx:
+            paragraph.add_run().add_break()
+        if not piece:
+            continue
+        run = paragraph.add_run(piece)
+        if bold:
+            run.bold = True
+        if italic:
+            run.italic = True
+
+
 def _add_inline_runs(paragraph, text: str) -> None:
+    text = _restore_md_text(text)
+    text = _IMAGE_RE.sub(lambda m: m.group(1) or "[imagen]", text)
+    text = _LINK_RE.sub(r"\1 (\2)", text)
     for part in _INLINE_RE.split(text):
         if not part:
             continue
         if part.startswith("**") and part.endswith("**") and len(part) >= 4:
-            run = paragraph.add_run(part[2:-2])
-            run.bold = True
+            _add_run_with_breaks(paragraph, part[2:-2], bold=True)
         elif part.startswith("*") and part.endswith("*") and len(part) >= 2:
-            run = paragraph.add_run(part[1:-1])
-            run.italic = True
+            _add_run_with_breaks(paragraph, part[1:-1], italic=True)
         elif part.startswith("`") and part.endswith("`") and len(part) >= 2:
-            run = paragraph.add_run(part[1:-1])
-            run.italic = True
+            _add_run_with_breaks(paragraph, part[1:-1], italic=True)
         else:
-            paragraph.add_run(part)
+            _add_run_with_breaks(paragraph, part)
+
+
+def _list_level(indent: str) -> int:
+    return len(indent.replace("\t", "    ")) // 2
+
+
+def _apply_list_level(paragraph, level: int) -> None:
+    if level > 0:
+        paragraph.paragraph_format.left_indent = Inches(0.25 + 0.35 * level)
 
 
 def _split_table_row(line: str) -> list[str]:
+    """Parte una fila ``| a | b |``. Un ``\\|`` dentro de la celda no es separador."""
     inner = line.strip()
     if inner.startswith("|"):
         inner = inner[1:]
     if inner.endswith("|"):
         inner = inner[:-1]
-    return [c.strip() for c in inner.split("|")]
+    cells: list[str] = []
+    buf: list[str] = []
+    escaped = False
+    for ch in inner:
+        if escaped:
+            buf.append("\\")
+            buf.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == "|":
+            cells.append("".join(buf).strip())
+            buf = []
+            continue
+        buf.append(ch)
+    if escaped:
+        buf.append("\\")
+    cells.append("".join(buf).strip())
+    return cells
 
 
-def markdown_to_docx(md: str, path: Path) -> None:
-    """Convierte el Markdown de la transcripción a un .docx editable en Word."""
+def _set_cell_text(cell, text: str) -> None:
+    paragraph = cell.paragraphs[0]
+    paragraph.text = ""
+    _add_inline_runs(paragraph, text)
+
+
+def _is_plain_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if stripped.startswith(("```", "~~~", ">")):
+        return False
+    if stripped in ("---", "***", "___"):
+        return False
+    if (
+        _PAGE_MARK_RE.match(stripped)
+        or _HTML_COMMENT_RE.match(stripped)
+        or _HEADING_RE.match(stripped)
+        or _TABLE_ROW_RE.match(stripped)
+        or _TABLE_SEP_RE.match(stripped)
+        or _UL_RE.match(line)
+        or _OL_RE.match(line)
+    ):
+        return False
+    return True
+
+
+def markdown_to_docx(md: str, path: Path, *, join_lines: bool = False) -> None:
+    """Convierte Markdown a un .docx editable en Word.
+
+    ``join_lines`` une líneas seguidas de un mismo párrafo. El export de un
+    PDF lo deja en falso: ahí cada línea ya es un bloque.
+    """
     doc = Document()
     body = _strip_frontmatter(md)
     lines = body.splitlines()
@@ -669,10 +861,25 @@ def markdown_to_docx(md: str, path: Path) -> None:
             i += 1
             continue
 
+        if stripped.startswith(("```", "~~~")):
+            fence = stripped[:3]
+            i += 1
+            code_lines: list[str] = []
+            while i < len(lines) and not lines[i].strip().startswith(fence):
+                code_lines.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1
+            p = doc.add_paragraph()
+            run = p.add_run("\n".join(code_lines))
+            run.font.name = "Consolas"
+            run.font.size = Pt(10)
+            continue
+
         heading = _HEADING_RE.match(stripped)
         if heading:
             level = min(len(heading.group(1)), 9)
-            text = heading.group(2).strip()
+            text = _plain_md_text(heading.group(2))
             if level == 1 and page_breaks <= 1 and i < 8:
                 doc.add_heading(text, level=0)
             else:
@@ -696,20 +903,22 @@ def markdown_to_docx(md: str, path: Path) -> None:
             for r_idx, row in enumerate(rows):
                 for c_idx in range(cols):
                     cell_text = row[c_idx] if c_idx < len(row) else ""
-                    table.rows[r_idx].cells[c_idx].text = cell_text
+                    _set_cell_text(table.rows[r_idx].cells[c_idx], cell_text)
             continue
 
-        ul = _UL_RE.match(stripped)
+        ul = _UL_RE.match(line)
         if ul:
             p = doc.add_paragraph(style="List Bullet")
-            _add_inline_runs(p, ul.group(1))
+            _apply_list_level(p, _list_level(ul.group(1)))
+            _add_inline_runs(p, ul.group(2))
             i += 1
             continue
 
-        ol = _OL_RE.match(stripped)
+        ol = _OL_RE.match(line)
         if ol:
             p = doc.add_paragraph(style="List Number")
-            _add_inline_runs(p, ol.group(2))
+            _apply_list_level(p, _list_level(ol.group(1)))
+            _add_inline_runs(p, ol.group(3))
             i += 1
             continue
 
@@ -717,9 +926,26 @@ def markdown_to_docx(md: str, path: Path) -> None:
             i += 1
             continue
 
-        p = doc.add_paragraph()
-        _add_inline_runs(p, stripped)
+        if stripped.startswith(">"):
+            quote: list[str] = []
+            while i < len(lines) and lines[i].strip().startswith(">"):
+                quote.append(re.sub(r"^>\s?", "", lines[i].strip()))
+                i += 1
+            p = doc.add_paragraph()
+            p.paragraph_format.left_indent = Inches(0.3)
+            _add_inline_runs(p, " ".join(quote))
+            for run in p.runs:
+                run.italic = True
+            continue
+
+        parts = [stripped]
         i += 1
+        if join_lines:
+            while i < len(lines) and _is_plain_line(lines[i]):
+                parts.append(lines[i].strip())
+                i += 1
+        p = doc.add_paragraph()
+        _add_inline_runs(p, " ".join(parts))
 
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(path))
@@ -1277,6 +1503,294 @@ def xlsx_to_markdown(xlsx_path: Path, cell_width: int = DEFAULT_CELL_WIDTH) -> s
 
 
 # --------------------------------------------------------------------------- #
+# PowerPoint (.pptx / .pptm) → Markdown
+# --------------------------------------------------------------------------- #
+def _shape_key(shape: object) -> tuple[int, int]:
+    top = getattr(shape, "top", None)
+    left = getattr(shape, "left", None)
+    return (int(top or 0), int(left or 0))
+
+
+def _ordered_shapes(shapes: object) -> list:
+    """Orden de lectura: de arriba hacia abajo y, en un grupo, sus hijos."""
+    try:
+        ordered = sorted(shapes, key=_shape_key)
+    except TypeError:
+        ordered = list(shapes)
+    result: list = []
+    for shape in ordered:
+        if getattr(shape, "shape_type", None) == MSO_SHAPE_TYPE.GROUP:
+            result.extend(_ordered_shapes(shape.shapes))
+        else:
+            result.append(shape)
+    return result
+
+
+def _placeholder_kind(shape: object):
+    if not getattr(shape, "is_placeholder", False):
+        return None
+    try:
+        return shape.placeholder_format.type
+    except (AttributeError, ValueError):
+        return None
+
+
+def _inline_text(paragraph: object) -> str:
+    runs = list(getattr(paragraph, "runs", []) or [])
+    if not runs:
+        return str(getattr(paragraph, "text", "") or "")
+    chunks: list[str] = []
+    for run in runs:
+        text = str(getattr(run, "text", "") or "")
+        address = ""
+        try:
+            link = run.hyperlink
+            if link is not None and link.address:
+                address = str(link.address).strip()
+        except (AttributeError, KeyError, ValueError):
+            address = ""
+        if address and address not in text:
+            text = f"{text} ({address})" if text.strip() else address
+        chunks.append(text)
+    return "".join(chunks)
+
+
+def _frame_plain(frame: object) -> str:
+    parts = [_inline_text(paragraph) for paragraph in frame.paragraphs]
+    return _one_line(" ".join(parts))
+
+
+def _frame_bullets(frame: object) -> str:
+    lines: list[str] = []
+    for paragraph in frame.paragraphs:
+        text = _paragraph_text(_inline_text(paragraph))
+        if not text:
+            continue
+        level = getattr(paragraph, "level", 0) or 0
+        try:
+            level = int(level)
+        except (TypeError, ValueError):
+            level = 0
+        level = min(max(level, 0), 8)
+        lines.append(f"{'  ' * level}- {text}")
+    return "\n".join(lines)
+
+
+def _picture_alt(shape: object) -> str:
+    try:
+        descr = shape._element._nvXxPr.cNvPr.get("descr") or ""
+    except AttributeError:
+        return ""
+    return str(descr).strip()
+
+
+def _pptx_table_markdown(shape: object, width: int) -> str:
+    table = shape.table
+    grid: list[list[str]] = []
+    origins: list[tuple[int, int, int, int, str]] = []
+    for r_idx, row in enumerate(table.rows):
+        line: list[str] = []
+        for c_idx, cell in enumerate(row.cells):
+            line.append(cell.text or "")
+            if getattr(cell, "is_merge_origin", False):
+                span_h = int(getattr(cell, "span_height", 1) or 1)
+                span_w = int(getattr(cell, "span_width", 1) or 1)
+                origins.append((r_idx, c_idx, span_h, span_w, cell.text or ""))
+        grid.append(line)
+    for r_idx, c_idx, span_h, span_w, text in origins:
+        if not text.strip():
+            continue
+        if span_h * span_w > 64 or (span_h == 1 and span_w > 3):
+            continue
+        for rr in range(r_idx, min(r_idx + span_h, len(grid))):
+            for cc in range(c_idx, min(c_idx + span_w, len(grid[rr]))):
+                if not grid[rr][cc].strip():
+                    grid[rr][cc] = text
+    rows = [row for row in grid if any(cell.strip() for cell in row)]
+    if not rows:
+        return ""
+    return _rows_to_table(rows, width)
+
+
+def _chart_table(chart: object, width: int) -> str:
+    plots = list(chart.plots)
+    if not plots:
+        return ""
+    plot = plots[0]
+    categories = [_one_line(str(category)) for category in plot.categories]
+    series_rows: list[tuple[str, list[str]]] = []
+    for series in plot.series:
+        raw_name = series.name
+        if isinstance(raw_name, str):
+            name = _one_line(raw_name)
+        elif raw_name is None:
+            name = ""
+        else:
+            name = _one_line(str(raw_name))
+        values: list[str] = []
+        for value in series.values:
+            if value is None:
+                values.append("")
+            else:
+                values.append(_excel_value_to_text(value, None))
+        series_rows.append((name, values))
+    if not categories or not series_rows:
+        return ""
+    rows = [["", *[name for name, _values in series_rows]]]
+    for index, category in enumerate(categories):
+        row = [category]
+        for _name, values in series_rows:
+            row.append(values[index] if index < len(values) else "")
+        rows.append(row)
+    if not any(cell.strip() for row in rows for cell in row):
+        return ""
+    return _rows_to_table(rows, width)
+
+
+def _chart_to_markdown(shape: object, width: int) -> str:
+    try:
+        chart = shape.chart
+    except (AttributeError, ValueError):
+        return ""
+    title = ""
+    try:
+        if chart.has_title:
+            title = _one_line(chart.chart_title.text_frame.text)
+    except Exception:  # noqa: BLE001
+        title = ""
+    table = ""
+    try:
+        table = _chart_table(chart, width)
+    except Exception:  # noqa: BLE001
+        table = ""
+    parts: list[str] = []
+    if title:
+        parts.append(_paragraph_text(title))
+    if table:
+        parts.append(table)
+    return "\n\n".join(parts)
+
+
+def _shape_markdown(shape: object, width: int) -> str:
+    if getattr(shape, "has_table", False):
+        return _pptx_table_markdown(shape, width)
+    if getattr(shape, "has_chart", False):
+        return _chart_to_markdown(shape, width)
+    if getattr(shape, "has_text_frame", False):
+        return _frame_bullets(shape.text_frame)
+    alt = _picture_alt(shape)
+    if alt:
+        return _paragraph_text(alt)
+    return ""
+
+
+def _notes_markdown(slide: object) -> str:
+    if not slide.has_notes_slide:
+        return ""
+    frame = slide.notes_slide.notes_text_frame
+    lines = [
+        _paragraph_text(_inline_text(paragraph))
+        for paragraph in frame.paragraphs
+    ]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+    return "### Notas\n\n" + "\n\n".join(lines)
+
+
+def _slide_is_hidden(prs: object, index: int) -> bool:
+    try:
+        slide_id = prs.slides._sldIdLst[index]
+    except (AttributeError, IndexError):
+        return False
+    return slide_id.get("show") == "0"
+
+
+def _render_slide(slide: object, number: int, hidden: bool, width: int) -> str:
+    title = ""
+    subtitle = ""
+    blocks: list[str] = []
+    for shape in _ordered_shapes(slide.shapes):
+        kind = _placeholder_kind(shape)
+        if (
+            kind in _TITLE_PLACEHOLDERS
+            and getattr(shape, "has_text_frame", False)
+            and not title
+        ):
+            title = _frame_plain(shape.text_frame)
+            if title:
+                continue
+        if (
+            kind == PP_PLACEHOLDER.SUBTITLE
+            and getattr(shape, "has_text_frame", False)
+            and not subtitle
+        ):
+            subtitle = _frame_plain(shape.text_frame)
+            if subtitle:
+                continue
+        block = _shape_markdown(shape, width)
+        if block:
+            blocks.append(block)
+    label = f"Diapositiva {number}"
+    if hidden:
+        label += " (oculta)"
+    heading = f"## {label}. {_heading_text(title)}" if title else f"## {label}"
+    parts = [heading, ""]
+    if subtitle:
+        parts.append(_paragraph_text(subtitle))
+        parts.append("")
+    for block in blocks:
+        parts.append(block)
+        parts.append("")
+    notes = _notes_markdown(slide)
+    if notes:
+        parts.append(notes)
+        parts.append("")
+    return "\n".join(parts).rstrip() + "\n"
+
+
+def pptx_to_markdown(pptx_path: Path, cell_width: int = DEFAULT_CELL_WIDTH) -> str:
+    """Convierte cada diapositiva en una sección Markdown.
+
+    Las tablas usan el mismo escape que Excel. Las imágenes sin texto
+    alternativo y los diagramas SmartArt no se transcriben.
+    """
+    if cell_width < 0:
+        cell_width = 0
+    try:
+        presentation = Presentation(str(pptx_path))
+    except (PackageNotFoundError, BadZipFile, ValueError) as exc:
+        raise RuntimeError(
+            "No se pudo leer el PowerPoint. Si es .ppt antiguo, ábrelo y "
+            "guárdalo como .pptx. Si tiene contraseña, quítala. "
+            f"Detalle: {exc}"
+        ) from exc
+
+    total = len(presentation.slides)
+    sections: list[str] = []
+    for index, slide in enumerate(presentation.slides, start=1):
+        hidden = _slide_is_hidden(presentation, index - 1)
+        sections.append(_render_slide(slide, index, hidden, cell_width))
+        console.print(f"  · {index}/{total}", markup=False)
+
+    if sections:
+        body = "\n\n".join(section.rstrip() for section in sections).strip() + "\n"
+    else:
+        body = "_La presentación no tiene diapositivas._\n"
+
+    frontmatter = (
+        "---\n"
+        f"fuente: {_yaml_quote(pptx_path.name)}\n"
+        f"diapositivas: {total}\n"
+        'conversion: "powerpoint→markdown"\n'
+        "generado_por: pdf2md\n"
+        "---\n\n"
+        f"# {pptx_path.stem}\n\n"
+    )
+    return frontmatter + body
+
+
+# --------------------------------------------------------------------------- #
 # Construcción del Markdown (PDF)
 # --------------------------------------------------------------------------- #
 def build_markdown(
@@ -1424,7 +1938,8 @@ def normalize_argv(argv: list[str]) -> list[str]:
         return argv
     if argv[0] in (
         "pdf", "images", "img", "imgs", "word", "docx",
-        "excel", "xlsx", "xlsm", "-h", "--help",
+        "excel", "xlsx", "xlsm", "pptx", "ppt", "slides",
+        "md", "markdown", "-h", "--help",
     ):
         if argv[0] in ("img", "imgs"):
             return ["images", *argv[1:]]
@@ -1432,6 +1947,10 @@ def normalize_argv(argv: list[str]) -> list[str]:
             return ["word", *argv[1:]]
         if argv[0] in ("xlsx", "xlsm"):
             return ["excel", *argv[1:]]
+        if argv[0] in ("ppt", "slides"):
+            return ["pptx", *argv[1:]]
+        if argv[0] == "markdown":
+            return ["md", *argv[1:]]
         return argv
 
     # Flags globales / de pdf sin subcomando → modo pdf (compatibilidad).
@@ -1445,6 +1964,10 @@ def normalize_argv(argv: list[str]) -> list[str]:
         return ["word", *argv]
     if is_excel_path(first) or first.suffix.lower() == ".xls":
         return ["excel", *argv]
+    if is_pptx_path(first) or first.suffix.lower() == ".ppt":
+        return ["pptx", *argv]
+    if is_md_path(first):
+        return ["md", *argv]
     return ["pdf", *argv]
 
 
@@ -1452,7 +1975,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Transcribe un PDF o imágenes a Markdown o Word "
-            "(OCR con Ollama / visión), o convierte Word o Excel → Markdown. "
+            "(OCR con Ollama / visión), convierte Word, Excel o PowerPoint "
+            "→ Markdown, o un Markdown → Word. "
             "Sin límite de páginas."
         ),
     )
@@ -1566,6 +2090,50 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "Máximo de caracteres por línea dentro de una celda. "
             f"Lo que sobre se parte con <br> (predet. {DEFAULT_CELL_WIDTH}). "
             "0 = no partir."
+        ),
+    )
+
+    pptx_p = sub.add_parser(
+        "pptx",
+        aliases=["slides"],
+        help="Convertir un .pptx (o .pptm) a Markdown.",
+    )
+    pptx_p.add_argument(
+        "pptx",
+        nargs="?",
+        help="Ruta del .pptx (si se omite, se pregunta).",
+    )
+    pptx_p.add_argument(
+        "-o", "--output",
+        help=f"Ruta o carpeta de salida (.md). Por defecto: {default_output_dir()}",
+    )
+    pptx_p.add_argument(
+        "--cell-width",
+        type=int,
+        default=DEFAULT_CELL_WIDTH,
+        metavar="N",
+        help=(
+            "Máximo de caracteres por línea dentro de una celda de tabla. "
+            f"Lo que sobre se parte con <br> (predet. {DEFAULT_CELL_WIDTH}). "
+            "0 = no partir."
+        ),
+    )
+
+    md_p = sub.add_parser(
+        "md",
+        aliases=["markdown"],
+        help="Convertir un .md a Word (.docx).",
+    )
+    md_p.add_argument(
+        "md",
+        nargs="?",
+        help="Ruta del .md (si se omite, se pregunta).",
+    )
+    md_p.add_argument(
+        "-o", "--output",
+        help=(
+            "Ruta o carpeta de salida (.docx). "
+            f"Por defecto: {default_output_dir()}"
         ),
     )
 
@@ -1738,6 +2306,92 @@ def run_excel(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_pptx(args: argparse.Namespace) -> int:
+    if args.pptx:
+        pptx_path = Path(clean_dropped_path(args.pptx))
+    else:
+        pptx_path = prompt_for_pptx()
+    if not pptx_path.exists():
+        console.print(f"[red]No existe:[/red] {pptx_path}")
+        return 1
+    if pptx_path.suffix.lower() == ".ppt":
+        console.print(
+            "[red]El formato .ppt (PowerPoint 97-2003) no está soportado.[/red] "
+            "Ábrelo y guárdalo como .pptx."
+        )
+        return 1
+    if not is_pptx_path(pptx_path):
+        console.print(f"[red]Archivo PowerPoint inválido:[/red] {pptx_path}")
+        return 1
+
+    cell_width = args.cell_width if args.cell_width > 0 else 0
+    out_path = resolve_output_path(pptx_path.stem, args.output, "md")
+
+    console.print(f"[cyan]Entrada :[/cyan] {pptx_path}")
+    console.print(f"[cyan]Salida  :[/cyan] {out_path}")
+    ancho = "sin corte" if cell_width == 0 else str(cell_width)
+    console.print(f"[cyan]Tablas  :[/cyan] ancho {ancho}")
+
+    try:
+        markdown = pptx_to_markdown(pptx_path, cell_width=cell_width)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Error al convertir el PowerPoint:[/red] {exc}")
+        return 1
+
+    write_output(markdown, out_path, "md")
+
+    console.print(
+        Panel.fit(
+            f"[green]Listo[/green] -> {out_path}\n"
+            f"{len(markdown):,} caracteres de Markdown.",
+            border_style="green",
+        )
+    )
+    return 0
+
+
+def run_md(args: argparse.Namespace) -> int:
+    md_path = Path(clean_dropped_path(args.md)) if args.md else prompt_for_md()
+    if not md_path.exists():
+        console.print(f"[red]No existe:[/red] {md_path}")
+        return 1
+    if not is_md_path(md_path):
+        console.print(f"[red]Archivo Markdown inválido:[/red] {md_path}")
+        return 1
+
+    out_path = resolve_output_path(md_path.stem, args.output, "docx")
+    if out_path.suffix.lower() != ".docx":
+        out_path = out_path.with_suffix(".docx")
+
+    console.print(f"[cyan]Entrada :[/cyan] {md_path}")
+    console.print(f"[cyan]Salida  :[/cyan] {out_path}")
+    console.print("[cyan]Motor   :[/cyan] python-docx (Markdown → Word)")
+
+    try:
+        markdown = md_path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        console.print("[red]El Markdown no está en UTF-8.[/red]")
+        return 1
+    except OSError as exc:
+        console.print(f"[red]No se pudo leer el Markdown:[/red] {exc}")
+        return 1
+
+    try:
+        markdown_to_docx(markdown, out_path, join_lines=True)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Error al convertir el Markdown:[/red] {exc}")
+        return 1
+
+    console.print(
+        Panel.fit(
+            f"[green]Listo[/green] -> {out_path}\n"
+            f"{len(markdown):,} caracteres de Markdown → Word.",
+            border_style="green",
+        )
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         return _main(argv)
@@ -1759,6 +2413,10 @@ def _main(argv: list[str] | None = None) -> int:
     args = parse_args(normalize_argv(raw))
     if args.command in ("xlsx", "xlsm"):
         args.command = "excel"
+    if args.command in ("ppt", "slides"):
+        args.command = "pptx"
+    if args.command == "markdown":
+        args.command = "md"
     if args.command == "docx":
         args.command = "word"
     if args.command in ("img", "imgs"):
@@ -1775,6 +2433,10 @@ def _main(argv: list[str] | None = None) -> int:
         return run_word(args)
     if args.command == "excel":
         return run_excel(args)
+    if args.command == "pptx":
+        return run_pptx(args)
+    if args.command == "md":
+        return run_md(args)
 
     if interactive and not getattr(args, "out_format", None) and os.name != "nt":
         args.out_format = Prompt.ask(
@@ -1792,7 +2454,8 @@ def _main(argv: list[str] | None = None) -> int:
         return run_images(args)
 
     console.print(
-        "[red]Comando no reconocido. Usa 'pdf', 'images', 'word' o 'excel'.[/red]"
+        "[red]Comando no reconocido. "
+        "Usa 'pdf', 'images', 'word', 'excel', 'pptx' o 'md'.[/red]"
     )
     return 1
 
