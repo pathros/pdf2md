@@ -35,21 +35,15 @@ En CPU (p. ej. Intel i5, 16 GB) el OCR va **lento** (minutos por página). La te
 
 En macOS/Linux, si ya tenías el entorno con `pyenv`, `setup.sh` sigue funcionando como respaldo.
 
-### Modelos y RAM (Windows 11 · Intel i5 · 16 GB)
+### Modelo de OCR
 
-`qwen3.5` es **multimodal** (texto + imagen), así que sirve para el OCR.
-
-| Modelo | Peso (Q4 en Ollama) | ¿En 16 GB RAM? |
-|--------|---------------------|----------------|
-| **`qwen3.5:9b`** | ~6.6 GB | **Sí.** Es el recomendado. Cierra Chrome/Cursor pesados si se pone justo. |
-| `qwen3.5:4b` | ~3.4 GB | Sí, más rápido y peor OCR. |
-| **`qwen3.5:27b`** | **~17 GB** | **No de forma usable.** El modelo ya supera la RAM. Hace falta **24 GB+** (ideal 32 GB) y, mejor, GPU con 16 GB+ VRAM. |
+El OCR usa un modelo de visión de Ollama. Por defecto es **`qwen3.8:27b`** (~17 GB): en pruebas locales transcribió mejor que otras opciones. Si ese tag no está instalado, se usa el primer modelo de esta lista que sí lo esté: `qwen3.6:27b`, `qwen3.5:27b`, `qwen3.6:35b`, `qwen3.5:9b`, `qwen3.5:4b`, `qwen3.6:9b`.
 
 ```bash
-ollama pull qwen3.5:9b
+ollama pull qwen3.8:27b
 ```
 
-Si no pasas `--model`, pdf2md elige solo: con menos de 24 GB de RAM prefiere `qwen3.5:9b`.
+En ~16 GB de RAM el 27b puede ir justo; ahí puedes forzar uno más chico con `--model qwen3.5:9b`.
 
 ## Instalación
 
@@ -67,7 +61,7 @@ Cierra y abre la terminal, clona el repo y configura:
 git clone https://github.com/pathros/pdf2md.git
 cd pdf2md
 powershell -ExecutionPolicy Bypass -File .\setup.ps1
-ollama pull qwen3.5:9b
+ollama pull qwen3.8:27b
 ```
 
 ### macOS / Linux
@@ -123,11 +117,11 @@ El menú pide modo y **formato** (`.md` o `.docx`). Arrastra el archivo a la ter
 ./run.sh documento.pdf
 ./run.sh pdf escaneado.pdf --format docx -o ~/Documents/salidas/
 ./run.sh pdf doc.pdf --ocr never --format md
-./run.sh pdf doc.pdf --model qwen3.8:27b   # forzar un modelo concreto
+./run.sh pdf doc.pdf --model qwen3.5:9b   # forzar un modelo más chico
 ```
 
-Con ≥24 GB de RAM, si no pasas `--model`, prioriza `qwen3.8:27b` cuando esté
-instalado (luego `qwen3.6:27b`, etc.).
+Si no pasas `--model`, usa `qwen3.8:27b` cuando esté instalado.
+
 ### Modo imágenes (OCR)
 
 ```bash

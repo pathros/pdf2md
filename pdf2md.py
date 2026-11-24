@@ -60,26 +60,21 @@ console = Console()
 
 # --- Configuración por defecto (sobreescribible por CLI o variables de entorno) ---
 DEFAULT_OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-# Fallback si Ollama no responde o no hay modelo conocido instalado.
-DEFAULT_VISION_MODEL = os.environ.get("PDF2MD_VISION_MODEL", "qwen3.5:9b")
+# OCR local: qwen3.8:27b quedó por encima de otros modelos de visión en pruebas locales.
+PREFERRED_VISION_MODEL = "qwen3.8:27b"
 
-# Preferencia cuando hay varios modelos de visión en Ollama.
-# En máquinas con <24 GB de RAM se prioriza el 9b (cabe en 16 GB).
-VISION_MODELS_LOW_RAM = (
+# Si el preferido no está instalado, se usa el primero de esta lista que sí lo esté.
+VISION_MODELS = (
+    "qwen3.8:27b",
+    "qwen3.6:27b",
+    "qwen3.5:27b",
+    "qwen3.6:35b",
     "qwen3.5:9b",
     "qwen3.5:latest",
     "qwen3.5:4b",
     "qwen3.6:9b",
     "benhaotang/Nanonets-OCR-s:F16",
 )
-VISION_MODELS_HIGH_RAM = (
-    "qwen3.8:27b",
-    "qwen3.6:27b",
-    "qwen3.5:27b",
-    *VISION_MODELS_LOW_RAM,
-)
-# Por debajo de esto, un 27B Q4 (~17 GB) pelea con el SO y suele ir a swap.
-HIGH_RAM_GB = 24.0
 
 # Si una página tiene menos de estos caracteres de texto real y contiene imágenes,
 # se considera escaneada (candidata a OCR).
@@ -158,46 +153,8 @@ DEFAULT_OUTPUT_DIR = default_output_dir()
 
 
 # --------------------------------------------------------------------------- #
-# Hardware / modelo de visión
+# Modelo de visión
 # --------------------------------------------------------------------------- #
-def total_ram_gb() -> float | None:
-    """RAM física total en GB, o None si no se pudo leer."""
-    try:
-        if sys.platform == "darwin":
-            import subprocess
-
-            out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True)
-            return int(out.strip()) / (1024 ** 3)
-        if sys.platform == "win32":
-            import ctypes
-
-            class MEMORYSTATUSEX(ctypes.Structure):
-                _fields_ = [
-                    ("dwLength", ctypes.c_ulong),
-                    ("dwMemoryLoad", ctypes.c_ulong),
-                    ("ullTotalPhys", ctypes.c_ulonglong),
-                    ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalPageFile", ctypes.c_ulonglong),
-                    ("ullAvailPageFile", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong),
-                    ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-                ]
-
-            stat = MEMORYSTATUSEX()
-            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
-                return None
-            return stat.ullTotalPhys / (1024 ** 3)
-        with open("/proc/meminfo", encoding="utf-8") as fh:
-            for line in fh:
-                if line.startswith("MemTotal:"):
-                    return int(line.split()[1]) / (1024 ** 2)
-    except Exception:  # noqa: BLE001
-        return None
-    return None
-
-
 def list_ollama_model_names(host: str) -> set[str]:
     try:
         resp = requests.get(f"{host}/api/tags", timeout=5)
@@ -217,34 +174,44 @@ def model_is_installed(names: set[str], model: str) -> bool:
 
 
 def resolve_vision_model(host: str, requested: str | None) -> str:
-    """Elige el modelo de visión: CLI / env / lo instalado según RAM."""
+    """Elige el modelo de visión: --model, o el primero instalado de VISION_MODELS.
+
+    qwen3.8:27b va primero. Si PDF2MD_VISION_MODEL apunta a un tag que no está
+    instalado, se ignora y se sigue la lista.
+    """
     if requested:
         return requested
-    env = os.environ.get("PDF2MD_VISION_MODEL")
-    if env:
-        return env
 
-    ram = total_ram_gb()
-    preferred = VISION_MODELS_HIGH_RAM if (ram or 0) >= HIGH_RAM_GB else VISION_MODELS_LOW_RAM
     names = list_ollama_model_names(host)
-    for candidate in preferred:
+    env = os.environ.get("PDF2MD_VISION_MODEL")
+    if env and (not names or model_is_installed(names, env)):
+        return env
+    if env and names:
+        console.print(
+            f"[yellow]PDF2MD_VISION_MODEL={env} no está instalado; "
+            "se busca otro modelo de visión.[/yellow]"
+        )
+
+    for candidate in VISION_MODELS:
         if model_is_installed(names, candidate):
             return candidate
-    return DEFAULT_VISION_MODEL
+    return env or PREFERRED_VISION_MODEL
 
 
-def warn_if_model_too_heavy(model: str) -> None:
-    ram = total_ram_gb()
-    if ram is None:
-        return
-    heavy = any(tag in model.lower() for tag in (":27b", ":35b", ":122b"))
-    if heavy and ram < HIGH_RAM_GB:
-        console.print(
-            f"[yellow]Aviso:[/yellow] '{model}' pesa ~17 GB+ (Q4). "
-            f"Esta máquina tiene ~{ram:.0f} GB de RAM; Windows + Ollama "
-            "suelen quedarse cortos y el 27b irá a swap o no cargará. "
-            "Recomendado: [bold]qwen3.5:9b[/bold] (~6.6 GB)."
+def ollama_unavailable_message(host: str, model: str) -> str:
+    names = sorted(list_ollama_model_names(host))
+    if not names:
+        return (
+            f"Ollama no responde en {host}. "
+            "¿Está corriendo 'ollama serve'?"
         )
+    installed = ", ".join(names)
+    return (
+        f"El modelo '{model}' no está en Ollama ({host}). "
+        f"Instalados: {installed}. "
+        f"OCR por defecto: {PREFERRED_VISION_MODEL} "
+        f"(`ollama pull {PREFERRED_VISION_MODEL}`)."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1814,11 +1781,10 @@ def build_markdown(
     if ocr_mode != "never":
         ocr_available = check_ollama(host, model)
         if not ocr_available:
-            msg = f"Ollama/modelo '{model}' no disponible en {host}."
+            msg = ollama_unavailable_message(host, model)
             if ocr_mode == "always" or any(scanned):
                 console.print(
-                    f"[yellow]{msg} Las páginas escaneadas quedarán vacías "
-                    f"(¿está corriendo 'ollama serve'?).[/yellow]"
+                    f"[yellow]{msg} Las páginas escaneadas quedarán vacías.[/yellow]"
                 )
 
     try:
@@ -1884,10 +1850,7 @@ def build_images_markdown(
 ) -> str:
     """OCR de cada imagen con Ollama y ensambla un único Markdown."""
     if not check_ollama(host, model):
-        raise RuntimeError(
-            f"Ollama/modelo '{model}' no disponible en {host}. "
-            "¿Está corriendo 'ollama serve' y el modelo descargado?"
-        )
+        raise RuntimeError(ollama_unavailable_message(host, model))
 
     total = len(images)
     parts: list[str] = []
@@ -2006,8 +1969,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     pdf_p.add_argument(
         "--model", default=None,
         help=(
-            "Modelo de visión en Ollama. Si se omite, se usa PDF2MD_VISION_MODEL "
-            "o el mejor modelo instalado según la RAM (9b en 16 GB)."
+            "Modelo de visión en Ollama. Si se omite, se usa el primero instalado "
+            f"de la lista (preferido: {PREFERRED_VISION_MODEL})."
         ),
     )
     pdf_p.add_argument(
@@ -2043,8 +2006,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     img_p.add_argument(
         "--model", default=None,
         help=(
-            "Modelo de visión en Ollama. Si se omite, se usa PDF2MD_VISION_MODEL "
-            "o el mejor modelo instalado según la RAM (9b en 16 GB)."
+            "Modelo de visión en Ollama. Si se omite, se usa el primero instalado "
+            f"de la lista (preferido: {PREFERRED_VISION_MODEL})."
         ),
     )
     img_p.add_argument(
@@ -2446,7 +2409,6 @@ def _main(argv: list[str] | None = None) -> int:
         )
 
     args.model = resolve_vision_model(args.host, args.model)
-    warn_if_model_too_heavy(args.model)
 
     if args.command == "pdf":
         return run_pdf(args)

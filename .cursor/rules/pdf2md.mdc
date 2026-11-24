@@ -22,5 +22,5 @@ Transcribe **cualquier PDF** (texto digital y/o escaneado) con IA **local**:
 
 ## Modelos
 
-- 16 GB RAM → `qwen3.5:9b`. No usar `qwen3.5:27b` (no cabe).
+- OCR por defecto: `qwen3.8:27b` (mejor resultado en pruebas locales). Si no está instalado, el siguiente modelo de visión de la lista (`qwen3.6:27b`, `qwen3.5:27b`, `qwen3.6:35b`, `qwen3.5:9b`…). En ~16 GB se puede forzar `--model qwen3.5:9b`.
 - UI: barra de progreso + últimas 5 líneas de transcripción en vivo.
